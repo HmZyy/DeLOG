@@ -387,8 +387,12 @@ mod tests {
 
     fn ground_geodetic(inv_vp: DMat4, ndc: [f64; 2], anchor: [f64; 2]) -> Option<(f64, f64)> {
         let hit = ground_hit(inv_vp, ndc[0], ndc[1])?;
-        let (lat, lon, _) =
-            crate::scene3d::geo::ned_to_geodetic(DVec3::new(-hit.z, hit.x, 0.0), anchor[0], anchor[1], 0.0);
+        let (lat, lon, _) = crate::scene3d::geo::ned_to_geodetic(
+            DVec3::new(-hit.z, hit.x, 0.0),
+            anchor[0],
+            anchor[1],
+            0.0,
+        );
         Some((lat, lon))
     }
 

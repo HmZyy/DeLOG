@@ -832,7 +832,7 @@ mod tests {
             Field::new("seq", DataType::Int64, true),
         ]));
         let timestamps = vec![Some(100i64); 40];
-        let seq_values = (0i64..40).map(|i| Some(i)).collect::<Vec<_>>();
+        let seq_values = (0i64..40).map(Some).collect::<Vec<_>>();
         let batch_large = RecordBatch::try_new(
             Arc::clone(&schema_large),
             vec![

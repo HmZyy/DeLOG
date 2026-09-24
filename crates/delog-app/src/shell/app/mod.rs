@@ -1,12 +1,16 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-pub mod commands;
 pub mod command_palette;
+pub mod commands;
 pub mod context_header;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
+#[cfg(all(test, feature = "scripting"))]
+mod sequence_tests;
+mod sequences;
+mod window_render;
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -14,23 +18,23 @@ use delog_core::time::TimeRange;
 use egui_extras::{Column, TableBuilder};
 use serde::Serialize;
 
+use crate::config::layout::doc::{LayoutDoc, LayoutError};
+use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::ingest::live::ConnectionDialog;
+use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
 use crate::plotting::browser::{self, BrowserFilterCache, BrowserModel};
-use crate::ui::diagnostics::DiagnosticsDock;
-use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::plotting::field_stats::{FieldStatsController, StatsTab};
 use crate::plotting::gpu::GpuBridge;
-use crate::config::layout::doc::{LayoutDoc, LayoutError};
-use crate::shell::layout_apply::{LayoutApply, LoadOutcome, PendingLayout};
-use crate::ingest::live::ConnectionDialog;
-use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
-use crate::map::worker::{CacheActionKind, CacheActionStatus, TileManager};
-use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 use crate::plotting::plot::ViewX;
 #[cfg(feature = "scripting")]
 use crate::scripting::scripts;
 use crate::session::session::Session;
-use crate::config::settings::{AppSettings, RenderMode, SettingsDialog, TileCacheUiState};
+use crate::shell::layout_apply::{LayoutApply, LoadOutcome, PendingLayout};
 use crate::sync::sync_window::SyncWindow;
+use crate::ui::diagnostics::DiagnosticsDock;
+use crate::ui::docks::{AppDockController, AppDockTab};
+use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
+use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 
 fn data_browser_panel(preferred_width: f32) -> egui::Panel {
     egui::Panel::left("data_browser_expanded")
@@ -44,7 +48,7 @@ fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
     tokens.space_sm + tokens.control_height + tokens.space_sm
 }
 
-fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
+pub(crate) fn central_workspace_frame(style: &egui::Style) -> egui::Frame {
     let mut frame = egui::Frame::central_panel(style);
     frame.inner_margin.left = 0;
     frame
@@ -60,7 +64,7 @@ fn keep_active_loads_repainting(ctx: &egui::Context, has_active_loads: bool) {
     }
 }
 use crate::plotting::timeline::Playback;
-use crate::shell::workspace::{PlotServices, Workspace};
+use crate::shell::workspace::Workspace;
 
 struct TrajectoryBuildResult {
     epoch: u64,
@@ -139,20 +143,28 @@ fn dynamic_palette_metadata(command: &commands::AppCommand) -> (&'static str, St
             format!("built-in native parser open with {name}"),
         ),
         AppCommand::OpenWithParser(name) => (
-            "Tools › Parsers › Run Parser",
+            "Tools › Parsers › Run parser",
             format!("custom parser run parse file {name}"),
         ),
         AppCommand::RunScript(name) => (
-            "Tools › Scripts › Run Scripts",
+            "Tools › Scripts › Run script",
             format!("script run execute {name}"),
         ),
+        AppCommand::RunSequence(name) => (
+            "Tools › Sequences › Run sequence",
+            format!("sequence run execute {name}"),
+        ),
         AppCommand::LoadNamedLayout(name) => (
-            "Tools › Layouts › Load Layout",
+            "Tools › Layouts › Load layout",
             format!("layout load workspace {name}"),
         ),
         AppCommand::DisconnectLink(_) => (
             "Header › Live link",
             "live link disconnect connection endpoint".to_owned(),
+        ),
+        AppCommand::ShowAbout => (
+            "Header › About",
+            "about version description repository github".to_owned(),
         ),
         AppCommand::ToggleShellEmphasis => (
             "Header › Workflow emphasis",
@@ -296,6 +308,90 @@ struct RunScriptDialog {
     scripts: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunKind {
+    Script,
+    Parser,
+    Dataflow,
+    Sequence,
+}
+
+impl RunKind {
+    const ALL: [Self; 4] = [Self::Script, Self::Parser, Self::Dataflow, Self::Sequence];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Script => "Script",
+            Self::Parser => "Parser",
+            Self::Dataflow => "Dataflow",
+            Self::Sequence => "Sequence",
+        }
+    }
+
+    const fn search_hint(self) -> &'static str {
+        match self {
+            Self::Script => "Search scripts…",
+            Self::Parser => "Search parsers…",
+            Self::Dataflow => "Search dataflows…",
+            Self::Sequence => "Search sequences…",
+        }
+    }
+
+    const fn plural(self) -> &'static str {
+        match self {
+            Self::Script => "scripts",
+            Self::Parser => "parsers",
+            Self::Dataflow => "dataflows",
+            Self::Sequence => "sequences",
+        }
+    }
+
+    fn no_match_hint(self) -> String {
+        crate::ui::empty::no_matching(self.plural())
+    }
+
+    fn empty_hint(self) -> String {
+        crate::ui::empty::no_saved(self.plural())
+    }
+}
+
+#[derive(Default)]
+struct RunPaletteDialog {
+    kinds: crate::ui::palette::PickerState,
+    items: crate::ui::palette::PickerState,
+    kind: Option<RunKind>,
+    names: Vec<String>,
+}
+
+impl RunPaletteDialog {
+    fn open(&mut self) {
+        self.items.close();
+        self.kind = None;
+        self.names.clear();
+        self.kinds.open();
+    }
+
+    fn choose(&mut self, kind: RunKind, names: Vec<String>) {
+        self.names = names;
+        self.kind = Some(kind);
+        self.items.open();
+    }
+
+    fn kind_items() -> Vec<crate::ui::palette::PickerItem<RunKind>> {
+        RunKind::ALL
+            .iter()
+            .map(|kind| crate::ui::palette::PickerItem::new(*kind, kind.label()))
+            .collect()
+    }
+
+    fn name_items(&self) -> Vec<crate::ui::palette::PickerItem<String>> {
+        self.names
+            .iter()
+            .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
+            .collect()
+    }
+}
+
 #[derive(Default)]
 struct LayoutManagerDialog {
     open: bool,
@@ -333,6 +429,8 @@ pub struct DelogApp {
     marker_us: Option<i64>,
     markers: crate::plotting::markers::Markers,
     snap_playhead: bool,
+    lock_readouts: bool,
+    alt_held: bool,
     frame: u64,
     last_epoch: u64,
     origin_us: i64,
@@ -369,6 +467,9 @@ pub struct DelogApp {
     browser_focus_filter: bool,
     inspector: inspector::InspectorState,
     shell_emphasis: context_header::ShellEmphasis,
+    show_about: bool,
+    update_checks: mpsc::Receiver<Result<crate::update::Release, String>>,
+    update_prompt: Option<crate::update::Release>,
     command_palette: command_palette::CommandPaletteState,
     dynamic_command_catalog: commands::DynamicCommandCatalog,
     docks: AppDockController,
@@ -392,14 +493,20 @@ pub struct DelogApp {
     source_metadata_dialog: Option<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
+    text_viewers: crate::plotting::text_viewer::TextViewers,
     annotation_toolbar_open: bool,
     armed_tool: Option<crate::plotting::annotations::place::ArmedTool>,
     sync_window: Option<SyncWindow>,
+    windows: Vec<crate::shell::windows::ExtendedWindow>,
+    next_window_id: u64,
     dataflow: crate::dataflow::window::DataFlowUi,
+    sequences: crate::sequences::runtime::SequenceRuntime,
     generate_markers_dialog: Option<crate::shell::generate_markers::GenerateMarkersDialog>,
     save_layout_dialog: SaveLayoutDialog,
     load_layout_dialog: LoadLayoutDialog,
     run_script_dialog: RunScriptDialog,
+    run_palette_dialog: RunPaletteDialog,
+    headless_flows: std::collections::BTreeMap<String, crate::dataflow::headless::HeadlessFlow>,
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
@@ -432,6 +539,11 @@ impl DelogApp {
         settings.theme.apply(&cc.egui_ctx);
         settings.font.apply(&cc.egui_ctx);
         let connection_dialog = ConnectionDialog::from_settings(&settings.live_connection);
+        let (update_checks_tx, update_checks) = mpsc::channel();
+        if settings.updates.check_for_updates {
+            let repaint = cc.egui_ctx.clone();
+            crate::update::spawn_check(update_checks_tx, move || repaint.request_repaint());
+        }
         let (tile_manager, tile_manager_error) =
             match directories::ProjectDirs::from("org", "hmzyy", "DeLOG") {
                 Some(dirs) => {
@@ -467,8 +579,8 @@ impl DelogApp {
             session,
             #[cfg(feature = "scripting")]
             scripts: {
-                let config_dir =
-                    crate::config::layout::doc::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                let config_dir = crate::config::layout::doc::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
                 scripts::ScriptsPanel::new(
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
@@ -486,6 +598,8 @@ impl DelogApp {
             marker_us: None,
             markers: crate::plotting::markers::Markers::new(),
             snap_playhead: false,
+            lock_readouts: false,
+            alt_held: false,
             frame: 0,
             last_epoch: u64::MAX,
             origin_us: 0,
@@ -519,6 +633,9 @@ impl DelogApp {
             browser_focus_filter: false,
             inspector: inspector::InspectorState::default(),
             shell_emphasis: context_header::ShellEmphasis::default(),
+            show_about: false,
+            update_checks,
+            update_prompt: None,
             command_palette: command_palette::CommandPaletteState::default(),
             dynamic_command_catalog: commands::DynamicCommandCatalog::default(),
             docks: AppDockController::new_empty(),
@@ -540,10 +657,14 @@ impl DelogApp {
             source_metadata_dialog: None,
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
+            text_viewers: crate::plotting::text_viewer::TextViewers::default(),
             annotation_toolbar_open: false,
             armed_tool: None,
             sync_window: None,
+            windows: Vec::new(),
+            next_window_id: 1,
             dataflow: crate::dataflow::window::DataFlowUi::new(),
+            sequences: crate::sequences::runtime::SequenceRuntime::default(),
             generate_markers_dialog: None,
             save_layout_dialog: SaveLayoutDialog {
                 open: false,
@@ -551,6 +672,8 @@ impl DelogApp {
             },
             load_layout_dialog: LoadLayoutDialog::default(),
             run_script_dialog: RunScriptDialog::default(),
+            run_palette_dialog: RunPaletteDialog::default(),
+            headless_flows: std::collections::BTreeMap::new(),
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
@@ -651,10 +774,7 @@ impl DelogApp {
                         .set_title("Open flight logs"),
                 };
                 if let Some(paths) = dialog.pick_files() {
-                    let _ = tx.send(PickedFiles {
-                        paths,
-                        parser,
-                    });
+                    let _ = tx.send(PickedFiles { paths, parser });
                     ctx.request_repaint();
                 }
             })
@@ -690,7 +810,9 @@ impl DelogApp {
                     .set_title("Export PNG")
                     .save_file();
                 if let Some(path) = picked {
-                    let _ = tx.send(crate::export::image_export::PngWriteRequest::new(path, png_bytes));
+                    let _ = tx.send(crate::export::image_export::PngWriteRequest::new(
+                        path, png_bytes,
+                    ));
                     ctx.request_repaint();
                 }
             })
@@ -1048,6 +1170,7 @@ impl DelogApp {
         snapshot: &delog_core::snapshot::StoreSnapshot,
         code: &'static str,
     ) {
+        self.sequences.interrupt_layout();
         let should_defer = !Self::snapshot_has_fields(snapshot);
         match crate::shell::layout_apply::load_doc(doc.clone(), snapshot) {
             Ok(LoadOutcome::Applied(layout)) => {
@@ -1130,8 +1253,10 @@ impl DelogApp {
     }
 
     fn clear_current_layout(&mut self) {
+        self.sequences.interrupt_layout();
         Self::clear_current_layout_state(
             &mut self.workspace,
+            &mut self.windows,
             &mut self.playback,
             &mut self.view,
             &mut self.view_fitted,
@@ -1152,6 +1277,7 @@ impl DelogApp {
     #[allow(clippy::too_many_arguments)]
     fn clear_current_layout_state(
         workspace: &mut Workspace,
+        windows: &mut Vec<crate::shell::windows::ExtendedWindow>,
         playback: &mut Playback,
         view: &mut Option<ViewX>,
         view_fitted: &mut bool,
@@ -1164,6 +1290,7 @@ impl DelogApp {
         traj_dirty: &mut bool,
     ) {
         *workspace = Workspace::new();
+        windows.clear();
         playback.speed = 1.0;
         playback.follow_live = false;
         *view = None;
@@ -1322,6 +1449,7 @@ impl DelogApp {
         crate::shell::layout_apply::current_doc(crate::shell::layout_apply::CurrentLayout {
             name,
             workspace: &self.workspace,
+            windows: &self.windows,
             snapshot,
             speed: self.playback.speed as f64,
             follow_live: self.playback.follow_live,
@@ -1339,10 +1467,11 @@ impl DelogApp {
         match crate::config::layout::doc::save_named(&name, &doc) {
             Ok(()) => {
                 self.dynamic_command_catalog.invalidate();
-                self.session.push_diagnostic(delog_core::diagnostics::Diag::info(
-                    "layout-save",
-                    format!("saved layout `{name}`"),
-                ));
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::info(
+                        "layout-save",
+                        format!("saved layout `{name}`"),
+                    ));
             }
             Err(err) => self
                 .session
@@ -1443,8 +1572,11 @@ impl DelogApp {
         ctx: &egui::Context,
         snapshot: &delog_core::snapshot::StoreSnapshot,
     ) {
-        let export =
-            crate::export::kml_export::build_kml(snapshot, &self.vehicles, &self.vehicle_trajectories);
+        let export = crate::export::kml_export::build_kml(
+            snapshot,
+            &self.vehicles,
+            &self.vehicle_trajectories,
+        );
         if export.exported == 0 {
             let _ = self
                 .exported_kml_tx
@@ -1540,17 +1672,18 @@ impl DelogApp {
     ) {
         let id = self.next_data_export_id;
         self.next_data_export_id += 1;
-        let chosen = match crate::export::data_export::resolve_export_fields(&request.fields, all_fields) {
-            Ok(chosen) => chosen,
-            Err(error) => {
-                let _ = self.data_export_tx.send(DataExportEvent::Failed {
-                    id,
-                    error: error.to_string(),
-                });
-                ctx.request_repaint();
-                return;
-            }
-        };
+        let chosen =
+            match crate::export::data_export::resolve_export_fields(&request.fields, all_fields) {
+                Ok(chosen) => chosen,
+                Err(error) => {
+                    let _ = self.data_export_tx.send(DataExportEvent::Failed {
+                        id,
+                        error: error.to_string(),
+                    });
+                    ctx.request_repaint();
+                    return;
+                }
+            };
         let origin_us = snapshot
             .global_time_range()
             .map(|range| range.min_us)
@@ -1634,22 +1767,28 @@ impl DelogApp {
         snapshot: &delog_core::snapshot::StoreSnapshot,
         parser_task_active: bool,
     ) -> commands::CommandContext {
+        let source_count = open_source_ids(snapshot).len();
         let offline_source_count = snapshot
             .sources
             .iter()
             .filter(|source| {
-                !source.entry.removed
-                    && source.entry.kind == delog_core::identity::SourceKind::File
+                !source.entry.removed && source.entry.kind == delog_core::identity::SourceKind::File
             })
             .count();
         commands::CommandContext::for_frame(
             snapshot.global_time_range().is_some(),
+            source_count,
             offline_source_count,
             self.session.live_statuses().len(),
             self.session.has_active_loads(),
             parser_task_active,
             cfg!(feature = "scripting"),
-            self.workspace.fields().next().is_some(),
+            self.workspace.fields().next().is_some()
+                || self
+                    .windows
+                    .iter()
+                    .any(|window| window.workspace.fields().next().is_some()),
+            self.field_stats.is_open(),
         )
     }
 
@@ -1658,7 +1797,9 @@ impl DelogApp {
         {
             let scripts = &mut self.scripts;
             let previous = self.dynamic_command_catalog.names().clone();
+            let manager = &mut self.sequences.manager;
             self.dynamic_command_catalog.ensure_with(|| {
+                manager.refresh();
                 Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
                     &previous,
                     crate::config::layout::doc::try_list_layouts(),
@@ -1670,7 +1811,9 @@ impl DelogApp {
         #[cfg(not(feature = "scripting"))]
         {
             let previous = self.dynamic_command_catalog.names().clone();
+            let manager = &mut self.sequences.manager;
             self.dynamic_command_catalog.ensure_with(|| {
+                manager.refresh();
                 Ok::<_, ()>(commands::merge_fallible_dynamic_command_refresh(
                     &previous,
                     crate::config::layout::doc::try_list_layouts(),
@@ -1702,10 +1845,8 @@ impl DelogApp {
         &self,
         context: commands::CommandContext,
     ) -> Vec<commands::CommandPresentation> {
-        use commands::{
-            AppCommand, CommandAvailability, CommandPresentation,
-        };
-        debug_assert_eq!(commands::dynamic_command_families().len(), 4);
+        use commands::{AppCommand, CommandAvailability, CommandPresentation};
+        debug_assert_eq!(commands::dynamic_command_families().len(), 5);
         debug_assert!(
             self.session
                 .parser_names()
@@ -1717,6 +1858,15 @@ impl DelogApp {
             dynamic.push(CommandPresentation {
                 command: AppCommand::OpenWithBuiltInParser(name.to_owned()),
                 label: label.to_owned(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            });
+        }
+        for name in self.sequences.manager.names() {
+            dynamic.push(CommandPresentation {
+                command: AppCommand::RunSequence(name.clone()),
+                label: name.clone(),
                 shortcut: None,
                 availability: CommandAvailability::Enabled,
                 selected: None,
@@ -1774,8 +1924,7 @@ impl DelogApp {
         commands::present_commands(
             &context,
             &commands::PresentationState {
-                shell_emphasis_live: self.shell_emphasis
-                    == context_header::ShellEmphasis::Live,
+                shell_emphasis_live: self.shell_emphasis == context_header::ShellEmphasis::Live,
                 cursor_sampling: self.hover_mode,
                 data_browser_open: !self.browser_collapsed,
                 inspector_open: self.inspector.open,
@@ -1795,7 +1944,9 @@ impl DelogApp {
                 },
                 logging_open: self.docks.is_open(AppDockTab::Logging),
                 playhead_snap: self.snap_playhead,
+                readout_lock: self.lock_readouts,
                 measuring_marker: self.marker_us.is_some(),
+                field_stats_open: self.field_stats.is_open(),
                 legends_visible: self.workspace.all_plot_legends_visible(),
                 annotation_toolbar_open: self.annotation_toolbar_open,
             },
@@ -1813,6 +1964,7 @@ impl DelogApp {
                     presentation.command,
                     commands::AppCommand::LoadNamedLayout(_)
                         | commands::AppCommand::RunScript(_)
+                        | commands::AppCommand::RunSequence(_)
                         | commands::AppCommand::OpenWithParser(_)
                         | commands::AppCommand::OpenWithBuiltInParser(_)
                 )
@@ -1846,6 +1998,53 @@ impl DelogApp {
         entries
     }
 
+    fn poll_update_checks(&mut self) {
+        while let Ok(result) = self.update_checks.try_recv() {
+            match result {
+                Ok(release) => {
+                    if crate::update::should_notify(
+                        &release,
+                        crate::update::CURRENT_VERSION,
+                        self.settings.updates.skipped_version.as_deref(),
+                    ) {
+                        self.update_prompt = Some(release);
+                    }
+                }
+                Err(error) => self.push_log(PendingLog::with_target(
+                    LogLevel::Info,
+                    "update-check",
+                    format!("Update check skipped: {error}"),
+                )),
+            }
+        }
+    }
+
+    fn show_update_prompt(&mut self, ctx: &egui::Context) {
+        let Some(release) = self.update_prompt.clone() else {
+            return;
+        };
+        let Some(action) = crate::update::popup::show(ctx, &release) else {
+            return;
+        };
+        self.update_prompt = None;
+        let before = self.settings.updates.clone();
+        crate::update::apply_action(
+            action,
+            &release,
+            &mut self.settings.updates.check_for_updates,
+            &mut self.settings.updates.skipped_version,
+        );
+        if self.settings.updates != before
+            && let Err(error) = crate::config::layout::doc::save_app_settings(&self.settings)
+        {
+            self.push_log(PendingLog::with_target(
+                LogLevel::Error,
+                "update-check",
+                format!("Could not save the update preference: {error}"),
+            ));
+        }
+    }
+
     fn dispatch_command(
         &mut self,
         command: commands::AppCommand,
@@ -1856,6 +2055,7 @@ impl DelogApp {
     ) {
         use commands::{AppCommand, CommandId};
         match command {
+            AppCommand::ShowAbout => self.show_about = true,
             AppCommand::ToggleShellEmphasis => {
                 self.shell_emphasis = self.shell_emphasis.toggle();
             }
@@ -1876,16 +2076,23 @@ impl DelogApp {
                 let _ = name;
             }
             AppCommand::RunScript(name) => self.run_named_script(&name),
+            AppCommand::RunSequence(name) => self.run_named_sequence(&name),
             AppCommand::LoadNamedLayout(name) => self.load_layout(&name, snapshot),
             AppCommand::DisconnectLink(index) => self.session.stop_live(index),
             AppCommand::Static(id) => match id {
                 CommandId::Open => self.spawn_open_dialog(ctx, None),
                 CommandId::ConnectLive => self.show_connection_dialog = true,
                 CommandId::SyncSources => self.sync_window = SyncWindow::open(snapshot),
+                CommandId::CloseAllSources => {
+                    for source in open_source_ids(snapshot) {
+                        self.session.remove_source(source);
+                    }
+                }
                 CommandId::DisconnectLive => {
                     self.session.stop_all_live();
                 }
                 CommandId::CancelTasks => {
+                    self.cancel_sequences();
                     self.session.cancel_all();
                     #[cfg(feature = "scripting")]
                     self.scripts.cancel_parsers();
@@ -1912,6 +2119,7 @@ impl DelogApp {
                 }
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
+                CommandId::NewPlotWindow => self.open_extended_window(),
                 CommandId::OpenDiagnostics => self.toggle_dock(AppDockTab::Diagnostics),
                 CommandId::OpenPerformance => self.toggle_dock(AppDockTab::Performance),
                 CommandId::OpenMarkers => self.toggle_dock(AppDockTab::Markers),
@@ -1922,8 +2130,7 @@ impl DelogApp {
                 CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
                 CommandId::SaveLayout => self.save_layout_dialog.open = true,
                 CommandId::LoadLayout => {
-                    self.load_layout_dialog.layouts =
-                        crate::config::layout::doc::list_layouts();
+                    self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
                     self.load_layout_dialog.picker.open();
                 }
                 CommandId::RunScript => {
@@ -1934,12 +2141,17 @@ impl DelogApp {
                     }
                     self.run_script_dialog.picker.open();
                 }
+                CommandId::RunPalette => self.open_run_palette(),
                 CommandId::ManageLayouts => self.open_layout_manager(),
                 CommandId::ClearLayout => self.clear_current_layout(),
                 CommandId::ImportLayout => self.spawn_import_layout_dialog(ctx),
                 CommandId::ExportLayout => self.spawn_export_layout_dialog(ctx, snapshot),
                 CommandId::EqualizePlots => self.workspace.equalize_plot_heights(),
                 CommandId::OpenDataFlow => self.dataflow.open = true,
+                CommandId::ManageSequences => {
+                    self.sequences.manager.open = true;
+                    self.sequences.manager.refresh();
+                }
                 CommandId::OpenScriptEditor => {
                     #[cfg(feature = "scripting")]
                     {
@@ -1957,6 +2169,7 @@ impl DelogApp {
                     self.scripts.open_parser_editor();
                 }
                 CommandId::TogglePlayheadSnap => self.snap_playhead = !self.snap_playhead,
+                CommandId::ToggleReadoutLock => self.lock_readouts = !self.lock_readouts,
                 CommandId::AddMeasuringMarker => {
                     self.marker_us = self.marker_us.is_none().then_some(self.playback.t_us)
                 }
@@ -1968,8 +2181,13 @@ impl DelogApp {
                     let visible = !self.workspace.all_plot_legends_visible();
                     self.workspace.set_all_plot_legends(visible);
                 }
-                CommandId::OpenFieldStats => {
-                    self.field_stats.open_plotted(self.workspace.unique_fields());
+                CommandId::ToggleFieldStats => {
+                    if self.field_stats.is_open() {
+                        self.field_stats.close();
+                    } else {
+                        let fields = self.plotted_fields();
+                        self.field_stats.open_plotted(fields);
+                    }
                 }
                 CommandId::ToggleAnnotationToolbar => {
                     self.annotation_toolbar_open = !self.annotation_toolbar_open;
@@ -2076,28 +2294,32 @@ impl DelogApp {
                         )),
                 }
             }
-            LayoutManagerAction::Delete(name) => match crate::config::layout::doc::delete_named(&name) {
-                Ok(()) => {
-                    self.dynamic_command_catalog.invalidate();
-                    self.refresh_layout_manager(None);
-                    self.session
-                        .push_diagnostic(delog_core::diagnostics::Diag::info(
+            LayoutManagerAction::Delete(name) => {
+                match crate::config::layout::doc::delete_named(&name) {
+                    Ok(()) => {
+                        self.dynamic_command_catalog.invalidate();
+                        self.refresh_layout_manager(None);
+                        self.session
+                            .push_diagnostic(delog_core::diagnostics::Diag::info(
+                                "layout-manager",
+                                format!("deleted layout `{name}`"),
+                            ));
+                    }
+                    Err(err) => self
+                        .session
+                        .push_diagnostic(delog_core::diagnostics::Diag::error(
                             "layout-manager",
-                            format!("deleted layout `{name}`"),
-                        ));
+                            err.to_string(),
+                        )),
                 }
-                Err(err) => self
-                    .session
-                    .push_diagnostic(delog_core::diagnostics::Diag::error(
-                        "layout-manager",
-                        err.to_string(),
-                    )),
-            },
+            }
         }
     }
 
     fn apply_layout(&mut self, layout: LayoutApply) {
         self.workspace = layout.workspace;
+        self.windows = layout.windows;
+        self.next_window_id = crate::shell::windows::next_window_id(&self.windows);
         self.view = None;
         self.view_fitted = false;
         self.fit_view_all = layout.fit_all;
@@ -2109,6 +2331,152 @@ impl DelogApp {
         self.traj_dirty = true;
         for diag in layout.diagnostics {
             self.session.push_diagnostic(diag);
+        }
+    }
+
+    fn start_headless_dataflow(&mut self, name: &str) {
+        let graph = crate::dataflow::store::GraphStore::default_dir()
+            .ok_or_else(|| "application data directory is unavailable".to_owned())
+            .and_then(|dir| crate::dataflow::store::GraphStore::new(dir).load(name));
+        let graph = match graph {
+            Ok(graph) => graph,
+            Err(error) => {
+                self.fail_headless_dataflow(name, &error);
+                return;
+            }
+        };
+        let sender = self.session.ingest_sender();
+        if let Some(mut previous) = self.headless_flows.remove(name) {
+            let _ = previous.controller.stop_owned(&sender);
+        }
+        #[allow(unused_mut)]
+        let mut flow = crate::dataflow::headless::HeadlessFlow::new(graph, name.to_owned());
+        #[cfg(feature = "scripting")]
+        if flow
+            .controller
+            .graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind, delog_flow::graph::NodeKind::Script(_)))
+        {
+            let host = self.scripts.engine_flow_host(
+                self.session.store(),
+                sender.clone(),
+                Arc::clone(self.session.metrics()),
+            );
+            flow.controller.set_script_host(Some(Arc::new(host)));
+        }
+        self.headless_flows.insert(name.to_owned(), flow);
+        self.push_log(crate::ui::logging::log(
+            LogLevel::Info,
+            format!("Dataflow '{name}': running in the background"),
+        ));
+    }
+
+    fn fail_headless_dataflow(&mut self, name: &str, error: &str) {
+        self.push_log(crate::ui::logging::log(
+            LogLevel::Error,
+            format!("Dataflow '{name}': {error}"),
+        ));
+        for (level, message) in self.dataflow.open_named(name) {
+            self.push_log(crate::ui::logging::log(level, message));
+        }
+    }
+
+    fn drive_headless_dataflows(&mut self, ctx: &egui::Context) {
+        if self.headless_flows.is_empty() {
+            return;
+        }
+        let sender = self.session.ingest_sender();
+        let snapshot = self.session.snapshot();
+        let live = self.session.has_connected_live();
+        let settings = self.settings.dataflow;
+        let now = ctx.input(|input| input.time);
+        let mut logs = Vec::new();
+        let mut failed = Vec::new();
+        for (name, flow) in &mut self.headless_flows {
+            let (flow_logs, result) = flow.drive(
+                &snapshot,
+                &sender,
+                live,
+                now,
+                settings.live_throttle_ms,
+                settings.live_overlap_secs,
+            );
+            logs.extend(
+                flow_logs
+                    .into_iter()
+                    .map(|(level, message)| (level, format!("Dataflow '{name}': {message}"))),
+            );
+            match result {
+                Some(Ok(())) => {
+                    logs.push((LogLevel::Info, format!("Dataflow '{name}': published")))
+                }
+                Some(Err(error)) => failed.push((name.clone(), error)),
+                None => {}
+            }
+        }
+        for (level, message) in logs {
+            self.push_log(crate::ui::logging::log(level, message));
+        }
+        for (name, error) in failed {
+            if let Some(mut flow) = self.headless_flows.remove(&name) {
+                let _ = flow.controller.stop_owned(&sender);
+            }
+            self.fail_headless_dataflow(&name, &error);
+        }
+    }
+
+    fn open_run_palette(&mut self) {
+        self.run_palette_dialog.open();
+    }
+
+    fn run_palette_names(&mut self, kind: RunKind) -> Vec<String> {
+        match kind {
+            RunKind::Script => {
+                #[cfg(feature = "scripting")]
+                {
+                    self.scripts.try_script_names().unwrap_or_default()
+                }
+                #[cfg(not(feature = "scripting"))]
+                Vec::new()
+            }
+            RunKind::Parser => {
+                #[cfg(feature = "scripting")]
+                {
+                    self.scripts.parser_names().unwrap_or_default()
+                }
+                #[cfg(not(feature = "scripting"))]
+                Vec::new()
+            }
+            RunKind::Dataflow => crate::dataflow::store::GraphStore::default_dir()
+                .map(|dir| crate::dataflow::store::GraphStore::new(dir).list())
+                .unwrap_or_default(),
+            RunKind::Sequence => crate::sequences::store::SequenceStore::default_store()
+                .and_then(|store| store.list().ok())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn open_run_palette_items(&mut self, kind: RunKind) {
+        let names = self.run_palette_names(kind);
+        self.run_palette_dialog.choose(kind, names);
+    }
+
+    fn run_palette_pick(&mut self, ctx: &egui::Context, kind: RunKind, name: &str) {
+        match kind {
+            RunKind::Script => {
+                #[cfg(feature = "scripting")]
+                self.run_named_script(name);
+            }
+            RunKind::Parser => {
+                #[cfg(feature = "scripting")]
+                let _ = self.scripts.request_open(ctx, name);
+                #[cfg(not(feature = "scripting"))]
+                let _ = ctx;
+            }
+            RunKind::Dataflow => self.start_headless_dataflow(name),
+            RunKind::Sequence => self.run_named_sequence(name),
         }
     }
 
@@ -2159,7 +2527,8 @@ impl DelogApp {
                 ctx,
                 "load-layout-picker",
                 "Search layouts…",
-                "No saved layouts.",
+                &crate::ui::empty::no_saved("layouts"),
+                &crate::ui::empty::no_matching("layouts"),
                 &items,
             ) {
                 Some(LayoutPick::Clear) => self.clear_current_layout(),
@@ -2171,20 +2540,49 @@ impl DelogApp {
             }
         }
 
+        if self.run_palette_dialog.kinds.open {
+            let items = RunPaletteDialog::kind_items();
+            if let Some(kind) = self.run_palette_dialog.kinds.show(
+                ctx,
+                "run-palette-kinds",
+                "Search what to run…",
+                "Nothing to run",
+                &crate::ui::empty::no_matching("actions"),
+                &items,
+            ) {
+                self.open_run_palette_items(kind);
+            }
+        }
+
+        if self.run_palette_dialog.items.open
+            && let Some(kind) = self.run_palette_dialog.kind
+        {
+            let items = self.run_palette_dialog.name_items();
+            if let Some(name) = self.run_palette_dialog.items.show(
+                ctx,
+                "run-palette-items",
+                kind.search_hint(),
+                &kind.empty_hint(),
+                &kind.no_match_hint(),
+                &items,
+            ) {
+                self.run_palette_pick(ctx, kind, &name);
+            }
+        }
+
         if self.run_script_dialog.picker.open {
             let items: Vec<_> = self
                 .run_script_dialog
                 .scripts
                 .iter()
-                .map(|name| {
-                    crate::ui::palette::PickerItem::new(name.clone(), name.clone())
-                })
+                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
                 .collect();
             if let Some(name) = self.run_script_dialog.picker.show(
                 ctx,
                 "run-script-picker",
                 "Search scripts…",
-                "No saved scripts.",
+                &crate::ui::empty::no_saved("scripts"),
+                &crate::ui::empty::no_matching("scripts"),
                 &items,
             ) {
                 self.run_named_script(&name);
@@ -2205,7 +2603,7 @@ impl DelogApp {
                         ui.vertical(|ui| {
                             ui.set_min_width(180.0);
                             if self.layout_manager_dialog.layouts.is_empty() {
-                                ui.weak("No saved layouts.");
+                                ui.weak(crate::ui::empty::no_saved("layouts"));
                             } else {
                                 for (i, name) in
                                     self.layout_manager_dialog.layouts.iter().enumerate()
@@ -2340,13 +2738,82 @@ impl DelogApp {
                 let snapshot = self.session.snapshot();
                 let layout = pending.apply(&snapshot);
                 self.apply_layout(layout);
+                self.sequences
+                    .layout_result
+                    .get_or_insert(crate::sequences::runner::StepOutcome::Succeeded);
             }
             if skip && let Some(pending) = self.pending_layout.take() {
                 let snapshot = self.session.snapshot();
                 let layout = pending.apply_skipping(&snapshot);
                 self.apply_layout(layout);
+                self.sequences
+                    .layout_result
+                    .get_or_insert(crate::sequences::runner::StepOutcome::Succeeded);
             }
         }
+    }
+
+    fn open_extended_window(&mut self) {
+        let id = crate::shell::windows::WindowId(self.next_window_id);
+        self.next_window_id += 1;
+        self.windows
+            .push(crate::shell::windows::ExtendedWindow::new(id));
+    }
+
+    fn apply_browser_response(
+        &mut self,
+        response: browser::BrowserResponse,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+    ) {
+        if let Some((source, offset_us)) = response.offset_change {
+            self.session.set_source_offset(source, offset_us);
+        }
+        if let Some(source) = response.remove_source {
+            self.session.remove_source(source);
+        }
+        if let Some(source) = response.inspect_source {
+            self.source_metadata_dialog = Some(source);
+        }
+        if let Some(field) = response.inspect_field_metadata {
+            self.field_metadata_dialog = Some(field);
+        }
+        if let Some(field) = response.inspect_field_stats {
+            self.field_stats.open(field);
+        }
+        if let Some(field) = response.open_text_viewer {
+            self.text_viewers.open(snapshot, field);
+        }
+        if let Some(field) = response.generate_markers {
+            let title = crate::plotting::legend::trace_label(snapshot, field);
+            let colors_before = self.settings.marker_value_colors.clone();
+            self.generate_markers_dialog =
+                Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
+                    snapshot,
+                    field,
+                    title,
+                    &mut self.settings.marker_value_colors,
+                ));
+            if self.settings.marker_value_colors != colors_before
+                && let Err(error) = crate::config::layout::doc::save_app_settings(&self.settings)
+            {
+                self.session
+                    .push_diagnostic(delog_core::diagnostics::Diag::error(
+                        "settings-save",
+                        error.to_string(),
+                    ));
+            }
+        }
+    }
+
+    fn plotted_fields(&self) -> Vec<delog_core::identity::FieldId> {
+        crate::shell::windows::union_fields(&self.workspace, &self.windows)
+    }
+
+    fn each_workspace_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut crate::shell::workspace::Workspace> {
+        std::iter::once(&mut self.workspace)
+            .chain(self.windows.iter_mut().map(|w| &mut w.workspace))
     }
 }
 
@@ -2447,6 +2914,7 @@ impl eframe::App for DelogApp {
             ui.ctx().request_repaint();
         }
         self.caches.begin_frame(self.frame);
+        self.gpu.begin_plot_frame(frame);
         for field in self.caches.poll_builds() {
             let label = snapshot
                 .fields
@@ -2468,10 +2936,15 @@ impl eframe::App for DelogApp {
         if snapshot.epoch != self.last_epoch {
             self.caches.on_epoch(&snapshot);
             self.try_apply_deferred_layout(&snapshot);
-            for field in self.workspace.prune_removed_fields(&snapshot) {
+            let mut pruned = Vec::new();
+            let mut resolved = 0;
+            for workspace in self.each_workspace_mut() {
+                pruned.extend(workspace.prune_removed_fields(&snapshot));
+                resolved += workspace.resolve_ghosts(&snapshot);
+            }
+            for field in pruned {
                 self.caches.unpin(field);
             }
-            let resolved = self.workspace.resolve_ghosts(&snapshot);
             if resolved > 0 {
                 self.session
                     .push_diagnostic(delog_core::diagnostics::Diag::info(
@@ -2481,9 +2954,13 @@ impl eframe::App for DelogApp {
             }
             self.last_epoch = snapshot.epoch;
         }
+        if !matches!(self.browser_model.as_ref(), Some((epoch, _)) if *epoch == snapshot.epoch) {
+            self.browser_filter.reset();
+            self.browser_model = Some((snapshot.epoch, BrowserModel::from_snapshot(&snapshot)));
+        }
         self.ensure_trajectory_build(ui.ctx(), &snapshot);
         self.maybe_autosave_session(&snapshot);
-        for field in self.workspace.fields().collect::<Vec<_>>() {
+        for field in self.plotted_fields() {
             self.caches.request(field, &snapshot);
         }
         self.caches.evict_over_budget();
@@ -2558,8 +3035,11 @@ impl eframe::App for DelogApp {
         let toolbar_model = global_plot_toolbar::GlobalPlotToolbarModel {
             cursor_sampling: self.hover_mode,
             playhead_snap: self.snap_playhead,
+            readout_lock: self.lock_readouts,
             measuring_marker: self.marker_us.is_some(),
+            field_stats_open: self.field_stats.is_open(),
             legend_position: self.settings.plot.legend_position,
+            legends_visible: self.workspace.all_plot_legends_visible(),
             annotation_toolbar_open: self.annotation_toolbar_open,
         };
         let header_output = egui::Panel::top("context_header")
@@ -2579,9 +3059,7 @@ impl eframe::App for DelogApp {
 
         let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
         let palette_shortcut = ui.ctx().input(|input| {
-            input.modifiers.command
-                && input.modifiers.shift
-                && input.key_pressed(egui::Key::P)
+            input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::P)
         });
         if command_palette::should_toggle_palette(palette_shortcut, wants_keyboard) {
             if self.command_palette.is_open() {
@@ -2591,16 +3069,16 @@ impl eframe::App for DelogApp {
             }
         }
 
-        // Existing shortcuts and palette selections share dispatch. Commands
-        // stay dormant while an editor or the palette owns keyboard input.
-        if !wants_keyboard && !self.command_palette.is_open() {
+        if !self.command_palette.is_open() {
             use commands::AppCommand;
             let shortcuts = ui.ctx().input(|input| {
                 SHORTCUT_KEYS
                     .iter()
                     .copied()
                     .filter(|key| input.key_pressed(*key))
-                    .filter_map(|key| command_for_shortcut(key, input.modifiers.command))
+                    .filter_map(|key| shortcut_for_key(key, input.modifiers.command))
+                    .filter(|(_, scope)| scope.allows(wants_keyboard))
+                    .map(|(command, _)| command)
                     .collect::<Vec<_>>()
             });
             for command in shortcuts {
@@ -2753,11 +3231,6 @@ impl eframe::App for DelogApp {
             if let Some(t_us) = action.marker_jump {
                 self.playback.scrub(t_us, range);
             }
-            if let Some((id, t_us)) = action.marker_move
-                && let Some(m) = self.markers.get_mut(id)
-            {
-                m.t_us = t_us.clamp(range.min_us, range.max_us);
-            }
             if let Some(id) = action.marker_delete {
                 self.markers.remove(id);
             }
@@ -2796,7 +3269,7 @@ impl eframe::App for DelogApp {
                                 crate::ui::icons::panel_left_open(),
                                 "Show data browser",
                             )
-                                .clicked()
+                            .clicked()
                             {
                                 self.browser_collapsed = false;
                                 self.browser_focus_filter = true;
@@ -2804,18 +3277,10 @@ impl eframe::App for DelogApp {
                         });
                     });
                 });
-        } else {
-            // Reuse the cached tree while the epoch is unchanged. Take it out of
-            // `self` so the render closure can mutably borrow other `self` fields
-            // without aliasing the model, then put it back after the panel.
-            let epoch = snapshot.epoch;
-            let model = match self.browser_model.take() {
-                Some((cached_epoch, model)) if cached_epoch == epoch => model,
-                _ => {
-                    self.browser_filter.reset();
-                    BrowserModel::from_snapshot(&snapshot)
-                }
-            };
+        } else if let Some((epoch, model)) = self.browser_model.take() {
+            // Take the model out of `self` so the render closure can mutably
+            // borrow other `self` fields without aliasing it, then put it back
+            // after the panel.
             let preferred_width = if model.is_empty() {
                 ui.spacing().text_edit_width
             } else {
@@ -2823,14 +3288,19 @@ impl eframe::App for DelogApp {
             };
             let browser_panel = data_browser_panel(preferred_width);
             if std::mem::take(&mut self.browser_focus_filter) {
-                ui.ctx()
-                    .memory_mut(|memory| memory.request_focus(browser::filter_id()));
+                ui.ctx().memory_mut(|memory| {
+                    memory.request_focus(browser::filter_id(
+                        crate::shell::windows::WindowId::MAIN.id_salt(),
+                    ))
+                });
             }
             browser_panel.show_inside(ui, |ui| {
                 // Offset edits go through the ingest thread (the single
                 // registry writer) and come back as a new epoch.
                 let browser_response = browser::ui(
                     ui,
+                    crate::shell::windows::WindowId::MAIN.id_salt(),
+                    crate::shell::windows::WindowId::MAIN.0,
                     epoch,
                     &model,
                     &mut self.browser_query,
@@ -2841,28 +3311,7 @@ impl eframe::App for DelogApp {
                 if browser_response.collapse_requested {
                     self.browser_collapsed = true;
                 }
-                if let Some((source, offset_us)) = browser_response.offset_change {
-                    self.session.set_source_offset(source, offset_us);
-                }
-                if let Some(source) = browser_response.remove_source {
-                    self.session.remove_source(source);
-                }
-                if let Some(source) = browser_response.inspect_source {
-                    self.source_metadata_dialog = Some(source);
-                }
-                if let Some(field) = browser_response.inspect_field_metadata {
-                    self.field_metadata_dialog = Some(field);
-                }
-                if let Some(field) = browser_response.inspect_field_stats {
-                    self.field_stats.open(field);
-                }
-                if let Some(field) = browser_response.generate_markers {
-                    let title = crate::plotting::legend::trace_label(&snapshot, field);
-                    self.generate_markers_dialog =
-                        Some(crate::shell::generate_markers::GenerateMarkersDialog::open(
-                            &snapshot, field, title,
-                        ));
-                }
+                self.apply_browser_response(browser_response, &snapshot);
             });
             self.browser_model = Some((epoch, model));
         }
@@ -2875,7 +3324,8 @@ impl eframe::App for DelogApp {
         }
         show_field_metadata_window(ui.ctx(), &snapshot, &mut self.field_metadata_dialog);
         if self.field_stats.is_tracking_plots() {
-            self.field_stats.sync_plotted(self.workspace.unique_fields());
+            let fields = self.plotted_fields();
+            self.field_stats.sync_plotted(fields);
         }
         show_field_stats_window(
             ui.ctx(),
@@ -2884,14 +3334,29 @@ impl eframe::App for DelogApp {
             &mut self.caches,
             &mut self.field_stats,
         );
-        let annotation_rows = self.workspace.annotation_rows();
+        if let Some(t_us) = self.text_viewers.show(
+            ui.ctx(),
+            &snapshot,
+            self.origin_us,
+            snapshot.global_time_range().map(|_| self.playback.t_us),
+            self.hover_mode,
+        ) && let Some(range) = snapshot.global_time_range()
+        {
+            self.playback.scrub(t_us, range);
+        }
+        let annotation_rows =
+            crate::shell::windows::annotation_rows(&self.workspace, &self.windows);
         if let Some(action) = crate::plotting::annotations::toolbar::show(
             ui.ctx(),
             &mut self.annotation_toolbar_open,
             &mut self.armed_tool,
             &annotation_rows,
         ) {
-            self.workspace.apply_annotation_action(action);
+            crate::shell::windows::apply_annotation_action(
+                &mut self.workspace,
+                &mut self.windows,
+                action,
+            );
         }
         if self.inspector.open {
             let traces = self.workspace.inspector_traces(&snapshot);
@@ -2944,153 +3409,27 @@ impl eframe::App for DelogApp {
             }
         }
 
+        let windows_ctx = ui.ctx().clone();
+        self.alt_held = crate::shell::windows::alt_held(&windows_ctx, &self.windows);
+        self.render_extended_windows(&windows_ctx, frame, &snapshot);
+
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
-        central_workspace_frame(ui.style()).show(ui, |ui| {
-            // The workspace renders even before any log loads, so plots can be
-            // arranged and the 3D view opened on an empty session.
-
-            let workspace_rect = ui.available_rect_before_wrap();
-
-            // The central panel is a fallback drop zone: dropping a field onto
-            // empty workspace space plots it in the first pane.
-            let frame_style = egui::Frame::default();
-            let mut handled_workspace_drop = false;
-            let (_, dropped) =
-                ui.dnd_drop_zone::<Vec<delog_core::identity::FieldId>, ()>(frame_style, |ui| {
-                    // Owned metrics handle: `behavior` borrows `self` mutably
-                    // below, so we can't reach `self.session` while it lives.
-                    let tree_metrics = self.session.metrics().clone();
-                    let live_map_scopes = self.workspace.map_scopes();
-                    self.gpu.retain_map_scopes(frame, &live_map_scopes);
-                    if let Some(manager) = self.tile_manager.as_mut() {
-                        manager.retain_scopes(&live_map_scopes);
-                    }
-                    self.gpu.begin_plot_frame(frame);
-                    let services = PlotServices {
-                        frame,
-                        snapshot: &snapshot,
-                        metrics: self.session.metrics(),
-                        gpu: &mut self.gpu,
-                        tile_manager: self.tile_manager.as_mut(),
-                        tile_manager_error: self.tile_manager_error.as_deref(),
-                        caches: &mut self.caches,
-                        view: &mut self.view,
-                        origin_us: self.origin_us,
-                        hover_mode: &mut self.hover_mode,
-                        snap_playhead: &mut self.snap_playhead,
-                        marker_us: &mut self.marker_us,
-                        armed_tool: &mut self.armed_tool,
-                        render_tuning: self.settings.render,
-                        scene3d: self.settings.scene3d,
-                        playhead_us: snapshot.global_time_range().map(|_| self.playback.t_us),
-                        playing: self.playback.playing,
-                        vehicles: &self.vehicles,
-                        trajectories: &self.vehicle_trajectories,
-                        traj_generation: self.traj_vehicle_revision,
-                        shared_y_gutter: self.workspace.shared_y_gutter,
-                        plot_display: self.settings.plot,
-                        markers: self.markers.as_slice(),
-                    };
-                    let mut behavior = crate::shell::workspace::Behavior::new(services);
-                    // `workspace_tree`: the egui_tiles layout + pane rendering.
-                    // Profiling (2026-06-28) showed egui_tiles' own machinery is
-                    // negligible (~0.02 ms); the cost is the per-pane `pane_ui`
-                    // render. `ui_workspace − workspace_tree` is begin/retain +
-                    // action handling.
-                    let tree_timer = tree_metrics.scope("workspace_tree");
-                    self.workspace.tree.ui(&mut behavior, ui);
-                    drop(tree_timer);
-                    let actions = behavior.into_actions();
-                    self.workspace.repair_focus();
-                    self.workspace.enforce_single_annotation_editor();
-                    // Share the widest pane gutter so stacked plots align next
-                    // frame. Converges in one frame; until then each
-                    // pane never drops below its own gutter, so labels never
-                    // clip.
-                    self.workspace.shared_y_gutter = actions.max_y_gutter;
-                    if let Some((tile_id, direction)) = actions.split {
-                        self.workspace.split_plot(tile_id, direction);
-                    }
-                    if let Some((tile_id, edge, fields)) = actions.edge_drop {
-                        let added = self
-                            .workspace
-                            .split_plot_with_traces(tile_id, edge, &fields);
-                        if !added.is_empty() {
-                            handled_workspace_drop = true;
-                            for field in added {
-                                self.caches.request(field, &snapshot);
-                            }
-                        }
-                    }
-                    if let Some(mv) = actions.legend_move {
-                        let field = self.workspace.apply_legend_move(mv);
-                        self.caches.request(field, &snapshot);
-                        handled_workspace_drop = true;
-                    }
-                    if let Some(tile_id) = actions.close {
-                        for field in self.workspace.close_plot(tile_id) {
-                            self.caches.unpin(field);
-                        }
-                    }
-                    if let Some(tile_id) = actions.focus {
-                        self.workspace.focused = Some(tile_id);
-                    }
-                    if let Some(t_us) = actions.scrub_to
-                        && let Some(range) = snapshot.global_time_range()
-                    {
-                        self.playback.scrub(t_us, range);
-                    }
-                    if actions.view_changed {
-                        self.playback.unlock_live();
-                        // Manual pan/zoom drops out of fit-all (like a scrub
-                        // disengages live-follow).
-                        self.fit_view_all = false;
-                    }
-                    if actions.open_vehicle_config {
-                        self.vehicle_dialog.open = true;
-                    }
-                    if actions.export_kml {
-                        self.spawn_export_kml_dialog(ui.ctx(), &snapshot);
-                    }
-                    if let Some(action) = actions.image {
-                        match action {
-                            crate::shell::workspace::WorkspaceImageAction::CopyPlot { rect } => {
-                                self.queue_image_capture(
-                                    ui.ctx(),
-                                    crate::export::image_export::ImageCaptureIntent::plot(
-                                        crate::export::image_export::ImageCaptureAction::Copy,
-                                        rect,
-                                        self.frame,
-                                    ),
-                                );
-                            }
-                            crate::shell::workspace::WorkspaceImageAction::ExportPlot { rect } => {
-                                self.queue_image_capture(
-                                    ui.ctx(),
-                                    crate::export::image_export::ImageCaptureIntent::plot(
-                                        crate::export::image_export::ImageCaptureAction::Export,
-                                        rect,
-                                        self.frame,
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                });
-            if let Some(fields) = dropped
-                && !handled_workspace_drop
-            {
-                for &field in fields.iter() {
-                    if self.workspace.add_trace_to_first_plot(field) {
-                        self.caches.request(field, &snapshot);
-                    }
-                }
-            }
-            let plotted: Vec<_> = self.workspace.fields().collect();
-            self.gpu.retain_plotted_buffers(frame, &plotted);
-            self.start_queued_image_capture(ui.ctx(), Some(workspace_rect));
-        });
+        let mut main_workspace = std::mem::replace(
+            &mut self.workspace,
+            crate::shell::workspace::Workspace::placeholder(),
+        );
+        self.render_workspace_window(
+            ui,
+            frame,
+            &snapshot,
+            crate::shell::windows::WindowId::MAIN,
+            &mut main_workspace,
+        );
+        self.workspace = main_workspace;
         drop(ui_workspace_timer);
+
+        let plotted = self.plotted_fields();
+        self.gpu.retain_plotted_buffers(frame, &plotted);
 
         // Render synchronization previews after the workspace has reset the
         // per-frame uniform allocator and retained its own GPU buffers. The
@@ -3114,15 +3453,6 @@ impl eframe::App for DelogApp {
         }
 
         {
-            #[cfg(feature = "scripting")]
-            if self.dataflow.open && self.dataflow.has_script_node() {
-                let host = self.scripts.engine_flow_host(
-                    self.session.store(),
-                    self.session.ingest_sender(),
-                    Arc::clone(self.session.metrics()),
-                );
-                self.dataflow.set_script_host(Some(host));
-            }
             let sender = self.session.ingest_sender();
             let live_connected = self.session.has_connected_live();
             let dataflow_settings = self.settings.dataflow;
@@ -3132,6 +3462,15 @@ impl eframe::App for DelogApp {
                     self.dataflow
                         .show(ui.ctx(), &snapshot, &sender, live_connected),
                 );
+            }
+            #[cfg(feature = "scripting")]
+            if self.dataflow.open && self.dataflow.has_script_node() {
+                let host = self.scripts.engine_flow_host(
+                    self.session.store(),
+                    self.session.ingest_sender(),
+                    Arc::clone(self.session.metrics()),
+                );
+                self.dataflow.set_script_host(Some(host));
             }
             logs.extend(self.dataflow.drive(
                 ui.ctx(),
@@ -3143,6 +3482,7 @@ impl eframe::App for DelogApp {
             for (level, message) in logs {
                 self.push_log(crate::ui::logging::log(level, message));
             }
+            self.drive_headless_dataflows(ui.ctx());
         }
 
         // Floating windows/dialogs + overlays; drops with the function (still
@@ -3150,6 +3490,12 @@ impl eframe::App for DelogApp {
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
         self.show_layout_windows(ui.ctx());
+        self.drive_sequences(ui.ctx());
+        self.poll_update_checks();
+        self.show_update_prompt(ui.ctx());
+        if self.show_about {
+            self.show_about = crate::ui::about::show(ui.ctx());
+        }
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
         let settings_before = self
             .settings_dialog
@@ -4265,9 +4611,10 @@ const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::ArrowRight,
     egui::Key::S,
     egui::Key::L,
-    egui::Key::K,
+    egui::Key::R,
     egui::Key::M,
     egui::Key::E,
+    egui::Key::T,
     egui::Key::O,
     egui::Key::Equals,
 ];
@@ -4287,29 +4634,43 @@ fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
     }
 }
 
-fn command_for_shortcut(
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShortcutScope {
+    Anywhere,
+    WhenKeyboardIsFree,
+}
+
+impl ShortcutScope {
+    fn allows(self, wants_keyboard: bool) -> bool {
+        matches!(self, Self::Anywhere) || !wants_keyboard
+    }
+}
+
+fn shortcut_for_key(
     key: egui::Key,
     command_modifier: bool,
-) -> Option<commands::CommandId> {
+) -> Option<(commands::CommandId, ShortcutScope)> {
+    use ShortcutScope::{Anywhere, WhenKeyboardIsFree};
     use commands::CommandId;
     match (key, command_modifier) {
-        (egui::Key::S, true) => Some(CommandId::SaveLayout),
-        (egui::Key::L, true) => Some(CommandId::LoadLayout),
-        (egui::Key::K, true) => Some(CommandId::RunScript),
-        (egui::Key::E, true) => Some(CommandId::ToggleDataBrowser),
-        (egui::Key::O, true) => Some(CommandId::Open),
-        (egui::Key::F1, _) => Some(CommandId::OpenDiagnostics),
-        (egui::Key::F2, _) => Some(CommandId::OpenPerformance),
-        (egui::Key::F3, _) => Some(CommandId::OpenMarkers),
-        (egui::Key::F9, _) => Some(CommandId::OpenScripting),
-        (egui::Key::F12, _) => Some(CommandId::OpenLogging),
-        (egui::Key::Space, _) => Some(CommandId::TogglePlayback),
-        (egui::Key::Home, _) => Some(CommandId::JumpStart),
-        (egui::Key::End, _) => Some(CommandId::JumpEnd),
-        (egui::Key::ArrowLeft, _) => Some(CommandId::StepLeft),
-        (egui::Key::ArrowRight, _) => Some(CommandId::StepRight),
-        (egui::Key::M, _) => Some(CommandId::AddMarker),
-        (egui::Key::Equals, _) => Some(CommandId::EqualizePlots),
+        (egui::Key::S, true) => Some((CommandId::SaveLayout, Anywhere)),
+        (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
+        (egui::Key::R, true) => Some((CommandId::RunPalette, Anywhere)),
+        (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
+        (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),
+        (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
+        (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
+        (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
+        (egui::Key::F3, _) => Some((CommandId::OpenMarkers, Anywhere)),
+        (egui::Key::F9, _) => Some((CommandId::OpenScripting, Anywhere)),
+        (egui::Key::F12, _) => Some((CommandId::OpenLogging, Anywhere)),
+        (egui::Key::Space, _) => Some((CommandId::TogglePlayback, WhenKeyboardIsFree)),
+        (egui::Key::Home, _) => Some((CommandId::JumpStart, WhenKeyboardIsFree)),
+        (egui::Key::End, _) => Some((CommandId::JumpEnd, WhenKeyboardIsFree)),
+        (egui::Key::ArrowLeft, _) => Some((CommandId::StepLeft, WhenKeyboardIsFree)),
+        (egui::Key::ArrowRight, _) => Some((CommandId::StepRight, WhenKeyboardIsFree)),
+        (egui::Key::M, _) => Some((CommandId::AddMarker, WhenKeyboardIsFree)),
+        (egui::Key::Equals, _) => Some((CommandId::EqualizePlots, WhenKeyboardIsFree)),
         _ => None,
     }
 }
@@ -4470,11 +4831,30 @@ fn next_legend_position(
     position: crate::config::settings::LegendPosition,
 ) -> crate::config::settings::LegendPosition {
     match position {
-        crate::config::settings::LegendPosition::TopLeft => crate::config::settings::LegendPosition::TopRight,
-        crate::config::settings::LegendPosition::TopRight => crate::config::settings::LegendPosition::BottomLeft,
-        crate::config::settings::LegendPosition::BottomLeft => crate::config::settings::LegendPosition::BottomRight,
-        crate::config::settings::LegendPosition::BottomRight => crate::config::settings::LegendPosition::TopLeft,
+        crate::config::settings::LegendPosition::TopLeft => {
+            crate::config::settings::LegendPosition::TopRight
+        }
+        crate::config::settings::LegendPosition::TopRight => {
+            crate::config::settings::LegendPosition::BottomLeft
+        }
+        crate::config::settings::LegendPosition::BottomLeft => {
+            crate::config::settings::LegendPosition::BottomRight
+        }
+        crate::config::settings::LegendPosition::BottomRight => {
+            crate::config::settings::LegendPosition::TopLeft
+        }
     }
+}
+
+fn open_source_ids(
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+) -> Vec<delog_core::identity::SourceId> {
+    snapshot
+        .sources
+        .iter()
+        .filter(|source| !source.entry.removed)
+        .map(|source| source.entry.id)
+        .collect()
 }
 
 #[cfg(test)]

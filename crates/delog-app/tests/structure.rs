@@ -5,6 +5,7 @@ const LAYER_RANKS: &[(&str, u32)] = &[
     ("ui", 0),
     ("scene3d", 0),
     ("map", 1),
+    ("update", 1),
     ("config", 2),
     ("plotting", 3),
     ("export", 4),
@@ -13,7 +14,8 @@ const LAYER_RANKS: &[(&str, u32)] = &[
     ("session", 5),
     ("scripting", 5),
     ("dataflow", 5),
-    ("shell", 6),
+    ("sequences", 6),
+    ("shell", 7),
 ];
 
 fn src_dir() -> PathBuf {
@@ -293,8 +295,8 @@ fn code_lines(source: &str) -> Vec<String> {
                 index += 1;
             }
             Scan::RawStr(hashes) => {
-                let closes = ch == '"'
-                    && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'));
+                let closes =
+                    ch == '"' && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'));
                 if closes {
                     mode = Scan::Code;
                     index += 1 + hashes;

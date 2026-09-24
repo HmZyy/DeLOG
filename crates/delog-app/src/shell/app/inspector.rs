@@ -7,14 +7,9 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::shell::workspace::InspectorTrace;
 
+#[derive(Default)]
 pub struct InspectorState {
     pub open: bool,
-}
-
-impl Default for InspectorState {
-    fn default() -> Self {
-        Self { open: false }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -198,7 +198,6 @@ pub struct PlotPane {
     pub show_legend: bool,
     pub show_tooltip: bool,
     pub show_info: bool,
-    pub marker_drag: bool,
     /// Keyed by `(field, sample t_us)`; value is a y-fraction (0 = top .. 1 = bottom).
     pub text_offsets: HashMap<(FieldId, i64), f32>,
     /// Empty/absent = show all.
@@ -219,7 +218,6 @@ impl Default for PlotPane {
             show_legend: true,
             show_tooltip: true,
             show_info: false,
-            marker_drag: false,
             text_offsets: HashMap::new(),
             text_filters: HashMap::new(),
             zoom_drag_anchor_us: None,

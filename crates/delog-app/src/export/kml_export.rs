@@ -69,7 +69,8 @@ fn vehicle_geo_segments(
                         return None;
                     }
                     let ned = glam::DVec3::new(-f64::from(p[2]), f64::from(p[0]), -f64::from(p[1]));
-                    let (lat, lon, alt) = crate::scene3d::geo::ned_to_geodetic(ned, rlat, rlon, ralt);
+                    let (lat, lon, alt) =
+                        crate::scene3d::geo::ned_to_geodetic(ned, rlat, rlon, ralt);
                     Some(GeodeticSample {
                         t_us,
                         lat_deg: lat.to_degrees(),

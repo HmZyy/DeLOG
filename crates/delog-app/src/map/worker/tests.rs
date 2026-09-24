@@ -1,5 +1,5 @@
 use super::*;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::{
     io::Cursor,
     sync::atomic::{AtomicUsize, Ordering},
@@ -36,20 +36,15 @@ fn server(body: Vec<u8>, content_type: &'static str, hits: Arc<AtomicUsize>) -> 
     thread::spawn(move || {
         for req in server.incoming_requests() {
             hits.fetch_add(1, Ordering::SeqCst);
-            let response = tiny_http::Response::from_data(body.clone()).with_header(
-                tiny_http::Header::from_bytes("Content-Type", content_type).unwrap(),
-            );
+            let response = tiny_http::Response::from_data(body.clone())
+                .with_header(tiny_http::Header::from_bytes("Content-Type", content_type).unwrap());
             let _ = req.respond(response);
         }
     });
     address
 }
 
-fn concurrency_server(
-    body: Vec<u8>,
-    active: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
-) -> String {
+fn concurrency_server(body: Vec<u8>, active: Arc<AtomicUsize>, peak: Arc<AtomicUsize>) -> String {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let address = format!("http://{}", server.server_addr());
     thread::spawn(move || {
@@ -148,7 +143,10 @@ fn request_at_scope_42() -> TileRequest {
     }
 }
 
-fn test_server_with_hits(body: Vec<u8>, hits: Arc<AtomicUsize>) -> (String, Receiver<()>, Sender<()>) {
+fn test_server_with_hits(
+    body: Vec<u8>,
+    hits: Arc<AtomicUsize>,
+) -> (String, Receiver<()>, Sender<()>) {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}/tile.jpeg", server.server_addr());
     let (observed_tx, observed_rx) = unbounded();
@@ -1143,7 +1141,8 @@ fn cache_write_failure_still_delivers_decoded_tile() {
 
     std::fs::remove_file(&cache_path).unwrap();
     std::fs::create_dir(&cache_path).unwrap();
-    let (url, observed, release) = test_server_with_hits(synthetic_tile(), Arc::new(AtomicUsize::new(0)));
+    let (url, observed, release) =
+        test_server_with_hits(synthetic_tile(), Arc::new(AtomicUsize::new(0)));
     let mut next = request_at_scope_42();
     next.id.x += 1;
     manager.request_with_url(next, Some(url));
@@ -1154,5 +1153,69 @@ fn cache_write_failure_still_delivers_decoded_tile() {
         manager.status().failure,
         None,
         "recovered cache error clears"
+    );
+}
+
+fn tile_request(x: u32, priority: i32) -> TileRequest {
+    TileRequest {
+        scope: MapScopeId(1),
+        provider: MapProviderId::BingSatellite,
+        id: TileId { zoom: 5, x, y: 1 },
+        corners: [[0.0; 3]; 4],
+        priority,
+        generation: 1,
+    }
+}
+
+#[test]
+fn disk_cached_tiles_are_served_while_every_worker_is_busy_downloading() {
+    let dir = tempfile::tempdir().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let warm_url = server(jpeg(), "image/jpeg", Arc::clone(&hits));
+
+    {
+        let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+        manager.request_with_url(tile_request(1, 0), Some(warm_url));
+        let ready = await_poll(&mut manager);
+        assert_eq!(ready.len(), 1, "warm-up tile must be delivered");
+    }
+
+    let mut manager = TileManager::new(dir.path().to_owned(), u64::MAX, || {}).unwrap();
+    let (gated_url, observed, release) = gated_server(jpeg());
+
+    for i in 0..WORKERS {
+        manager.request_with_url(
+            tile_request(100 + i as u32, 0),
+            Some(format!("{gated_url}/block{i}")),
+        );
+    }
+    for _ in 0..WORKERS {
+        observed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("all workers should pick up a download");
+    }
+
+    manager.request_with_url(
+        tile_request(1, -1),
+        Some("http://127.0.0.1:1/unused".into()),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut served = false;
+    while Instant::now() < deadline {
+        if manager
+            .poll(MapScopeId(1))
+            .iter()
+            .any(|tile| tile.id.x == 1)
+        {
+            served = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = release;
+    assert!(
+        served,
+        "a tile already on disk was never delivered while {WORKERS} network downloads were in flight"
     );
 }

@@ -16,6 +16,7 @@ pub mod minmax;
 pub mod palette;
 pub mod scatter;
 pub mod scene_target;
+pub mod sky;
 pub mod step;
 pub mod target;
 pub mod traj3d;
@@ -27,12 +28,14 @@ pub use errors::GpuErrorHub;
 pub use grid3d::{Grid3dPipeline, GridUniform};
 pub use line::LinePipeline;
 pub use map_tiles::{
-    MAP_TILE_CAPACITY, MapTileDrawGroups, MapTileError, MapTilePipeline, MapTileUpload,
+    MAP_TILE_CAPACITY, MapTileDrawGroups, MapTileError, MapTilePipeline, MapTileUniform,
+    MapTileUpload,
 };
 pub use mesh::{MeshCpu, MeshError, MeshGpu, MeshPipeline, MeshUniform, Vertex, load_glb};
 pub use minmax::{COLUMN_STRIDE, MinMaxColPipeline};
 pub use scatter::ScatterPipeline;
 pub use scene_target::{COLOR_FORMAT, DEPTH_FORMAT, SAMPLE_COUNT, Scene3dTarget};
+pub use sky::{GROUND_RGB, HORIZON_RGB, SkyPipeline, SkyUniform, ZENITH_RGB};
 pub use step::StepPipeline;
 pub use target::{OffscreenTarget, RgbaImage};
 pub use traj3d::{Traj3dPipeline, Traj3dUniform};

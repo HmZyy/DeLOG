@@ -72,6 +72,10 @@ pub struct ParsersPanel {
 }
 
 impl ParsersPanel {
+    pub fn load_source(&self, name: &str) -> Result<String, String> {
+        self.library.load(name).map_err(|e| e.to_string())
+    }
+
     pub fn new(parsers_dir: PathBuf) -> Self {
         let (parse_requests_tx, parse_requests) = mpsc::channel();
         Self {
@@ -507,7 +511,7 @@ impl ParsersPanel {
         ui.separator();
         let names = self.list().unwrap_or_default();
         if names.is_empty() {
-            ui.weak("No saved parsers.");
+            ui.weak(crate::ui::empty::no_saved("parsers"));
             return;
         }
         let selected = self.saved_original_name.clone();

@@ -1049,12 +1049,10 @@ impl Write for FinalFlushFailure {
 
 #[test]
 fn returns_final_flush_failure_after_writing_footer() {
-    let (snapshot, field) =
-        float_topic_snapshot("flight", "VALUE", vec![1], vec![Some(2.0)], 0);
+    let (snapshot, field) = float_topic_snapshot("flight", "VALUE", vec![1], vec![Some(2.0)], 0);
 
-    let error =
-        write_structured_parquet(FinalFlushFailure::default(), &snapshot, &[field], (1, 1))
-            .unwrap_err();
+    let error = write_structured_parquet(FinalFlushFailure::default(), &snapshot, &[field], (1, 1))
+        .unwrap_err();
 
     assert!(
         error

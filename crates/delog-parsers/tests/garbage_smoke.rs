@@ -13,7 +13,9 @@ use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_parsers::mavlink::{FrameDecoder, extract_fields};
-use delog_parsers::{ArduPilotParser, LogParser, ParquetParser, ParseError, TlogParser, ULogParser};
+use delog_parsers::{
+    ArduPilotParser, LogParser, ParquetParser, ParseError, TlogParser, ULogParser,
+};
 use parquet::arrow::ArrowWriter;
 
 #[derive(Default)]

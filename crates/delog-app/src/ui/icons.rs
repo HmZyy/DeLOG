@@ -85,6 +85,14 @@ pub fn arrow_left_right() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/arrow-left-right.svg")
 }
 
+pub fn route_to_playhead() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/route-to-playhead.svg")
+}
+
+pub fn route_window() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/route-window.svg")
+}
+
 #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
 pub fn square() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/square.svg")
@@ -132,6 +140,10 @@ pub fn sigma() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/sigma.svg")
 }
 
+pub fn message_square() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/message-square.svg")
+}
+
 pub fn ruler() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/ruler.svg")
 }
@@ -168,6 +180,10 @@ pub fn close() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/x.svg")
 }
 
+pub fn app_window() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/app-window.svg")
+}
+
 pub fn panel_left_close() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/panel-left-close.svg")
 }
@@ -196,6 +212,14 @@ pub fn minus() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/minus.svg")
 }
 
+pub fn check() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/check.svg")
+}
+
 pub fn slash() -> ImageSource<'static> {
     egui::include_image!("../../assets/icons/slash.svg")
+}
+
+pub fn grip_vertical() -> ImageSource<'static> {
+    egui::include_image!("../../assets/icons/grip-vertical.svg")
 }

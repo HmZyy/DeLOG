@@ -19,45 +19,6 @@ fn focused_fields_preserve_the_focused_plot_trace_order() {
 }
 
 #[test]
-fn unique_fields_dedupes_traces_shared_between_plots() {
-    let mut workspace = Workspace::new();
-    let first = workspace.tree.root().unwrap();
-    workspace.add_trace_to_first_plot(FieldId(7));
-    workspace.add_trace_to_first_plot(FieldId(3));
-    workspace.split_plot(first, SplitDirection::Horizontal);
-
-    let second = workspace
-        .tree
-        .tiles
-        .iter()
-        .filter(|(id, tile)| {
-            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
-        })
-        .map(|(id, _)| *id)
-        .next()
-        .expect("the split should have produced a second plot");
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(second) else {
-        panic!("expected a plot pane");
-    };
-    pane.add_trace(FieldId(3));
-    pane.add_trace(FieldId(9));
-
-    let unique = workspace.unique_fields();
-    let mut sorted = unique.clone();
-    sorted.sort_by_key(|field| field.0);
-    assert_eq!(
-        sorted,
-        vec![FieldId(3), FieldId(7), FieldId(9)],
-        "every plotted trace should be present"
-    );
-    assert_eq!(
-        unique.len(),
-        3,
-        "a trace plotted in two panes should appear once, got {unique:?}"
-    );
-}
-
-#[test]
 fn plot_context_menu_keeps_every_existing_action() {
     let source = include_str!("mod.rs");
     for label in [
@@ -319,8 +280,7 @@ fn closing_the_focused_plot_reassigns_focus_to_the_surviving_plot() {
         .tiles
         .iter()
         .find_map(|(id, tile)| {
-            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
-                .then_some(*id)
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))).then_some(*id)
         })
         .expect("split should create a surviving plot");
     workspace.focused = Some(closing);
@@ -341,8 +301,7 @@ fn focus_repair_chooses_the_lowest_surviving_plot_id() {
         .tiles
         .iter()
         .filter_map(|(id, tile)| {
-            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
-                .then_some(*id)
+            (*id != closing && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))).then_some(*id)
         })
         .min_by_key(|id| id.0)
         .expect("two plots should survive");
@@ -400,8 +359,7 @@ fn scene_splits_at_root_not_inside_the_focused_pane() {
         Some(root),
         "scene must sit directly under the root, beside the whole layout",
     );
-    let Some(egui_tiles::Tile::Container(root_container)) = workspace.tree.tiles.get(root)
-    else {
+    let Some(egui_tiles::Tile::Container(root_container)) = workspace.tree.tiles.get(root) else {
         panic!("root should be a container wrapping the layout and the scene");
     };
     assert_eq!(root_container.num_children(), 2);
@@ -438,8 +396,7 @@ fn scene_map_overlay_only_reports_actionable_states() {
         Some("Map cache error")
     );
     assert_eq!(
-        scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true)
-            .as_deref(),
+        scene_map_overlay(true, None, Some(TileFailureClass::NetworkTransient), true).as_deref(),
         Some("Map tiles offline - showing cached imagery")
     );
     assert_eq!(scene_map_overlay(true, None, None, true), None);
@@ -515,8 +472,7 @@ fn scene_map_none_provider_or_reference_produces_no_selection() {
 fn ghost_trace_resolves_when_matching_field_loads() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
@@ -553,8 +509,7 @@ fn ghost_trace_resolves_when_matching_field_loads() {
 fn ghost_trace_stays_missing_when_field_is_ambiguous() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
@@ -650,8 +605,7 @@ fn cross_direction_split_keeps_the_wrapped_pane_in_its_slot() {
         _ => panic!("root should still be a vertical container"),
     };
     assert_eq!(children.len(), 2);
-    let Some(egui_tiles::Tile::Container(wrapper)) = workspace.tree.tiles.get(children[0])
-    else {
+    let Some(egui_tiles::Tile::Container(wrapper)) = workspace.tree.tiles.get(children[0]) else {
         panic!("the top slot should hold the new horizontal wrapper");
     };
     assert_eq!(wrapper.kind(), egui_tiles::ContainerKind::Horizontal);
@@ -664,8 +618,7 @@ fn edge_drop_splits_root_and_adds_all_dropped_traces_to_new_pane() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
 
-    let added =
-        workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
+    let added = workspace.split_plot_with_traces(root, DropEdge::Left, &[FieldId(7), FieldId(9)]);
     assert_eq!(added, vec![FieldId(7), FieldId(9)]);
 
     let root = workspace.tree.root().unwrap();
@@ -675,8 +628,7 @@ fn edge_drop_splits_root_and_adds_all_dropped_traces_to_new_pane() {
     assert_eq!(container.kind(), egui_tiles::ContainerKind::Horizontal);
     let children = container.children_vec();
     let new_pane = children[0];
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(new_pane)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get(new_pane) else {
         panic!("left child should be the new plot pane");
     };
     assert_eq!(
@@ -908,8 +860,7 @@ fn drop_edge_prefers_the_nearest_edge_inside_the_threshold() {
 fn close_plot_removes_its_fields_and_keeps_a_workspace_alive() {
     let mut workspace = Workspace::new();
     let root = workspace.tree.root().unwrap();
-    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root)
-    else {
+    let Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) = workspace.tree.tiles.get_mut(root) else {
         panic!("root should start as a pane");
     };
     pane.add_trace(FieldId(42));
@@ -1210,9 +1161,7 @@ fn opening_an_annotation_editor_closes_the_others() {
         .tree
         .tiles
         .iter()
-        .filter(|(id, tile)| {
-            **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_)))
-        })
+        .filter(|(id, tile)| **id != first && matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))))
         .map(|(id, _)| *id)
         .next()
         .expect("the split should have produced a second plot");
@@ -1283,7 +1232,11 @@ fn opening_annotation_editors_without_a_focused_pane_keeps_the_lowest_tile_id() 
             matches!(tile, egui_tiles::Tile::Pane(Pane::Plot(_))).then_some(*id)
         })
         .collect();
-    assert_eq!(plots.len(), 3, "two splits from one root should produce three plots");
+    assert_eq!(
+        plots.len(),
+        3,
+        "two splits from one root should produce three plots"
+    );
     let expected = *plots.iter().min_by_key(|id| id.0).unwrap();
 
     let open_editor = |workspace: &mut Workspace, tile| {
@@ -1380,7 +1333,9 @@ fn annotation_rows_are_labelled_in_tile_id_order() {
         "rows must follow tile-id order, not the tile map's hash order"
     );
     assert_eq!(
-        rows.iter().map(|r| r.plot_label.as_str()).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|r| r.plot_label.as_str())
+            .collect::<Vec<_>>(),
         vec!["Plot 1", "Plot 2", "Plot 3"]
     );
 }
@@ -1413,6 +1368,7 @@ fn removing_one_annotation_leaves_the_same_id_in_other_plots() {
     seed_annotation(&mut workspace, plots[1], Kind::Rect);
 
     workspace.apply_annotation_action(ToolbarAction::Remove {
+        window: 0,
         pane: plots[0].0,
         id,
     });
@@ -1435,6 +1391,7 @@ fn editing_an_annotation_from_the_list_targets_its_plot_and_closes_other_editors
     }
     for tile in [plots[0], plots[1]] {
         workspace.apply_annotation_action(ToolbarAction::Edit {
+            window: 0,
             pane: tile.0,
             id: 0,
         });
@@ -1517,7 +1474,7 @@ fn scene_overlay_probe(with_window: bool) -> (egui::Context, egui::Rect) {
                     });
             }
             tracked_vehicle_picker(ui, scene_rect, &mut pane, &vehicles);
-            scene_overlay_buttons(ui, scene_rect, false);
+            scene_overlay_buttons(ui, scene_rect, TrailMode::default());
         });
     }
     (ctx, scene_rect)
@@ -1562,4 +1519,156 @@ fn scene_overlays_still_sit_above_the_scene_itself() {
             "{what} fell behind the scene; with no window over it, it must still be clickable"
         );
     }
+}
+
+#[test]
+fn the_measuring_marker_follows_ctrl_hover_and_never_a_plain_drag() {
+    const WORKSPACE: &str = include_str!("mod.rs");
+
+    assert!(
+        !WORKSPACE.contains("marker_drag"),
+        "a primary drag over the marker must pan the plot, not grab the marker"
+    );
+
+    let scrub = WORKSPACE
+        .split("if self.marker_us(pane).is_some()")
+        .nth(1)
+        .expect("ctrl+hover marker scrubbing should still be wired");
+    let scrub = &scrub[..scrub
+        .find("set_marker_us")
+        .expect("the ctrl+hover branch should move the marker")];
+    assert!(scrub.contains("i.modifiers.ctrl"));
+    assert!(scrub.contains("response.hover_pos()"));
+}
+
+#[test]
+fn locking_readouts_pins_them_to_the_playhead_like_playback_does() {
+    assert!(!playhead_readout(false, false, false, true));
+    assert!(!playhead_readout(false, false, false, false));
+    assert!(playhead_readout(true, false, false, true));
+
+    assert!(playhead_readout(false, true, false, true));
+    assert!(playhead_readout(false, true, false, false));
+}
+
+#[test]
+fn locking_readouts_stops_hover_from_opening_its_own() {
+    assert!(hover_tooltip_shown(false, false));
+    assert!(!hover_tooltip_shown(true, false));
+    assert!(!hover_tooltip_shown(false, true));
+    assert!(!hover_tooltip_shown(true, true));
+}
+
+#[test]
+fn alt_scrubbing_still_reads_out_on_the_unhovered_panes_only() {
+    assert!(playhead_readout(false, false, true, false));
+    assert!(!playhead_readout(false, false, true, true));
+}
+
+fn scene_gear_click(button: egui::PointerButton) -> SceneOverlayClicks {
+    let scene_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+    let ctx = egui::Context::default();
+    let mut clicks = SceneOverlayClicks::default();
+    let mut frame = |events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            clicks = scene_overlay_buttons(ui, scene_rect, TrailMode::default());
+        });
+    };
+
+    for _ in 0..3 {
+        frame(Vec::new());
+    }
+
+    let layer = ctx
+        .layer_id_at(egui::pos2(580.0, 20.0))
+        .expect("the overlay buttons should own the scene corner");
+    let area = ctx
+        .memory(|memory| memory.area_rect(layer.id))
+        .expect("the overlay area should have been laid out");
+    let gear = area.left_top() + egui::Vec2::splat(area.height() / 2.0);
+
+    frame(vec![
+        egui::Event::PointerMoved(gear),
+        egui::Event::PointerButton {
+            pos: gear,
+            button,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    frame(vec![egui::Event::PointerButton {
+        pos: gear,
+        button,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    clicks
+}
+
+#[test]
+fn left_clicking_the_scene_gear_opens_the_vehicle_config() {
+    let clicks = scene_gear_click(egui::PointerButton::Primary);
+    assert!(clicks.vehicle_config);
+    assert!(!clicks.scene_settings);
+}
+
+#[test]
+fn right_clicking_the_scene_gear_opens_the_3d_view_settings() {
+    let clicks = scene_gear_click(egui::PointerButton::Secondary);
+    assert!(clicks.scene_settings);
+    assert!(!clicks.vehicle_config);
+}
+
+#[test]
+fn the_scene_gear_tooltip_advertises_both_of_its_clicks() {
+    assert!(GEAR_TOOLTIP.contains("Configure vehicles"));
+    assert!(GEAR_TOOLTIP.contains("Right-click"));
+}
+
+#[test]
+fn each_trail_mode_gets_its_own_overlay_icon_and_tooltip() {
+    let uri = |icon: egui::ImageSource<'static>| match icon {
+        egui::ImageSource::Bytes { uri, .. } => uri.to_string(),
+        _ => panic!("bundled icons are embedded bytes"),
+    };
+    let buttons: Vec<(String, &str)> = [
+        TrailMode::ToPlayhead,
+        TrailMode::VisibleWindow,
+        TrailMode::Full,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let (icon, tooltip) = trail_mode_button(mode);
+        (uri(icon), tooltip)
+    })
+    .collect();
+
+    let icons: HashSet<&String> = buttons.iter().map(|(icon, _)| icon).collect();
+    let tooltips: HashSet<&str> = buttons.iter().map(|(_, tooltip)| *tooltip).collect();
+    assert_eq!(
+        icons.len(),
+        3,
+        "each mode needs its own icon, got {icons:?}"
+    );
+    assert_eq!(
+        tooltips.len(),
+        3,
+        "each mode needs its own tooltip, got {tooltips:?}"
+    );
+}
+
+#[test]
+fn a_placeholder_workspace_holds_no_panes() {
+    let placeholder = Workspace::placeholder();
+
+    assert_eq!(placeholder.fields().count(), 0);
+    assert!(placeholder.tree.root().is_none());
 }

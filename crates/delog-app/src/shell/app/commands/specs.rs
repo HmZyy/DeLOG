@@ -44,6 +44,13 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
+            CloseAllSources => spec!(
+                "Close all sources",
+                Source,
+                None,
+                "remove clear unload discard logs",
+                Palette
+            ),
             DisconnectLive => {
                 spec!(
                     "Disconnect all live links",
@@ -120,11 +127,20 @@ impl CommandId {
             ToggleScene3d => spec!(
                 "3D Scene",
                 Panels,
-                None,
+                Some("Ctrl+T"),
                 "vehicle map view",
                 Header,
                 ClassicMenu,
                 SceneToolbar,
+                Shortcut,
+                Palette
+            ),
+            NewPlotWindow => spec!(
+                "New plot window",
+                Panels,
+                None,
+                "window monitor screen detach extend viewport",
+                ClassicMenu,
                 Palette
             ),
             OpenDiagnostics => spec!(
@@ -192,9 +208,24 @@ impl CommandId {
             RunScript => spec!(
                 "Run script…",
                 Workspace,
-                Some("Ctrl+K"),
+                None,
                 "script execute run",
+                Palette
+            ),
+            RunPalette => spec!(
+                "Run…",
+                Workspace,
+                Some("Ctrl+R"),
+                "run script parser layout sequence saved",
                 Shortcut,
+                Palette
+            ),
+            ManageSequences => spec!(
+                "Manage sequences…",
+                Workspace,
+                None,
+                "sequence automation ordered run",
+                ClassicMenu,
                 Palette
             ),
             ManageLayouts => {
@@ -241,7 +272,7 @@ impl CommandId {
             ),
             OpenDataFlow => {
                 spec!(
-                    "Data flow",
+                    "Dataflow",
                     Analysis,
                     None,
                     "pipeline graph",
@@ -285,6 +316,14 @@ impl CommandId {
                 GlobalToolbar,
                 Palette
             ),
+            ToggleReadoutLock => spec!(
+                "Toggle readout lock",
+                Analysis,
+                None,
+                "pin value tooltip playhead hover",
+                GlobalToolbar,
+                Palette
+            ),
             AddMeasuringMarker => spec!(
                 "Toggle measuring marker",
                 Analysis,
@@ -307,10 +346,11 @@ impl CommandId {
                     Workspace,
                     None,
                     "plot key visibility",
+                    GlobalToolbar,
                     Palette
                 )
             }
-            OpenFieldStats => {
+            ToggleFieldStats => {
                 spec!(
                     "Field stats",
                     Workspace,

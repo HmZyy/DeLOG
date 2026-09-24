@@ -625,7 +625,10 @@ mod tests {
             assert!((normal.length() - 1.0).abs() < 1e-5, "{normal:?}");
             assert!(normal.dot(pos.normalize()) > 0.999, "{normal:?} at {pos:?}");
         }
-        assert!(outward_wound(&sphere), "sphere triangles should face outward");
+        assert!(
+            outward_wound(&sphere),
+            "sphere triangles should face outward"
+        );
     }
 
     #[test]

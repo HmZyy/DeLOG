@@ -1,26 +1,32 @@
 use delog_core::field_view::SampleMode;
 
 use crate::config::settings::LegendPosition;
-use crate::shell::app::commands::{AppCommand, CommandAvailability, CommandId, CommandPresentation};
+use crate::shell::app::commands::{
+    AppCommand, CommandAvailability, CommandId, CommandPresentation,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlobalPlotControl {
     CursorSampling(SampleMode),
     TogglePlayheadSnap,
+    ToggleReadoutLock,
     ToggleMeasuringMarker,
     CycleLegendPosition,
-    OpenFieldStats,
+    ToggleLegends,
+    ToggleFieldStats,
     ToggleAnnotationToolbar,
 }
 
 #[cfg(test)]
 impl GlobalPlotControl {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::CursorSampling(SampleMode::Prev),
         Self::TogglePlayheadSnap,
+        Self::ToggleReadoutLock,
         Self::ToggleMeasuringMarker,
         Self::CycleLegendPosition,
-        Self::OpenFieldStats,
+        Self::ToggleLegends,
+        Self::ToggleFieldStats,
         Self::ToggleAnnotationToolbar,
     ];
 }
@@ -29,11 +35,15 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
     match control {
         GlobalPlotControl::CursorSampling(mode) => AppCommand::SetCursorSampling(mode),
         GlobalPlotControl::TogglePlayheadSnap => AppCommand::Static(CommandId::TogglePlayheadSnap),
+        GlobalPlotControl::ToggleReadoutLock => AppCommand::Static(CommandId::ToggleReadoutLock),
         GlobalPlotControl::ToggleMeasuringMarker => {
             AppCommand::Static(CommandId::AddMeasuringMarker)
         }
-        GlobalPlotControl::CycleLegendPosition => AppCommand::Static(CommandId::CycleLegendPosition),
-        GlobalPlotControl::OpenFieldStats => AppCommand::Static(CommandId::OpenFieldStats),
+        GlobalPlotControl::CycleLegendPosition => {
+            AppCommand::Static(CommandId::CycleLegendPosition)
+        }
+        GlobalPlotControl::ToggleLegends => AppCommand::Static(CommandId::ToggleLegends),
+        GlobalPlotControl::ToggleFieldStats => AppCommand::Static(CommandId::ToggleFieldStats),
         GlobalPlotControl::ToggleAnnotationToolbar => {
             AppCommand::Static(CommandId::ToggleAnnotationToolbar)
         }
@@ -43,8 +53,11 @@ pub const fn command_for_control(control: GlobalPlotControl) -> AppCommand {
 pub struct GlobalPlotToolbarModel {
     pub cursor_sampling: SampleMode,
     pub playhead_snap: bool,
+    pub readout_lock: bool,
     pub measuring_marker: bool,
+    pub field_stats_open: bool,
     pub legend_position: LegendPosition,
+    pub legends_visible: bool,
     pub annotation_toolbar_open: bool,
 }
 
@@ -73,9 +86,7 @@ pub fn show(
                         .selectable_label(model.cursor_sampling == mode, sample_mode_label(mode))
                         .clicked()
                     {
-                        commands.push(command_for_control(GlobalPlotControl::CursorSampling(
-                            mode,
-                        )));
+                        commands.push(command_for_control(GlobalPlotControl::CursorSampling(mode)));
                         ui.close();
                     }
                 }
@@ -90,6 +101,17 @@ pub fn show(
             .clicked()
             {
                 commands.push(command_for_control(GlobalPlotControl::TogglePlayheadSnap));
+            }
+
+            if crate::ui::components::icon_button(
+                ui,
+                crate::ui::icons::message_square(),
+                readout_lock_tooltip(model.readout_lock),
+                model.readout_lock,
+            )
+            .clicked()
+            {
+                commands.push(command_for_control(GlobalPlotControl::ToggleReadoutLock));
             }
 
             let marker = command_for_control(GlobalPlotControl::ToggleMeasuringMarker);
@@ -113,30 +135,31 @@ pub fn show(
                     )
                 })
                 .inner;
-            let marker_response = match marker_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    marker_response.on_disabled_hover_text(*reason)
-                }
-                _ => marker_response,
-            };
+            let marker_response =
+                match marker_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        marker_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => marker_response,
+                };
             if marker_response.clicked() {
                 commands.push(marker);
             }
 
-            if crate::ui::components::icon_button(
+            let legend_response = crate::ui::components::icon_button(
                 ui,
                 legend_position_icon(model.legend_position),
-                "Cycle legend position on all plots",
+                legend_tooltip(model.legends_visible),
                 false,
-            )
-            .clicked()
-            {
-                commands.push(command_for_control(GlobalPlotControl::CycleLegendPosition));
+            );
+            if let Some(control) = legend_button_control(
+                legend_response.clicked(),
+                legend_response.secondary_clicked(),
+            ) {
+                commands.push(command_for_control(control));
             }
 
-            let stats = command_for_control(GlobalPlotControl::OpenFieldStats);
+            let stats = command_for_control(GlobalPlotControl::ToggleFieldStats);
             let stats_presentation = presentations
                 .iter()
                 .find(|presentation| presentation.command == stats);
@@ -149,18 +172,19 @@ pub fn show(
                         ui,
                         crate::ui::icons::sigma(),
                         "Field stats for every plotted trace",
-                        false,
+                        stats_presentation
+                            .and_then(|presentation| presentation.selected)
+                            .unwrap_or(model.field_stats_open),
                     )
                 })
                 .inner;
-            let stats_response = match stats_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    stats_response.on_disabled_hover_text(*reason)
-                }
-                _ => stats_response,
-            };
+            let stats_response =
+                match stats_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        stats_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => stats_response,
+                };
             if stats_response.clicked() {
                 commands.push(stats);
             }
@@ -186,14 +210,13 @@ pub fn show(
                     )
                 })
                 .inner;
-            let annotations_response = match annotations_presentation
-                .map(|presentation| &presentation.availability)
-            {
-                Some(CommandAvailability::Disabled(reason)) => {
-                    annotations_response.on_disabled_hover_text(*reason)
-                }
-                _ => annotations_response,
-            };
+            let annotations_response =
+                match annotations_presentation.map(|presentation| &presentation.availability) {
+                    Some(CommandAvailability::Disabled(reason)) => {
+                        annotations_response.on_disabled_hover_text(*reason)
+                    }
+                    _ => annotations_response,
+                };
             if annotations_response.clicked() {
                 commands.push(annotations);
             }
@@ -207,6 +230,32 @@ fn sample_mode_label(mode: SampleMode) -> &'static str {
         SampleMode::Prev => "Previous",
         SampleMode::Next => "Next",
         SampleMode::Linear => "Linear",
+    }
+}
+
+fn readout_lock_tooltip(locked: bool) -> &'static str {
+    if locked {
+        "Readouts locked to the playhead. Click to follow the hovered cursor again"
+    } else {
+        "Lock readouts to the playhead on all plots"
+    }
+}
+
+fn legend_tooltip(legends_visible: bool) -> &'static str {
+    if legends_visible {
+        "Cycle legend position on all plots. Right-click to hide every legend"
+    } else {
+        "Cycle legend position on all plots. Right-click to show every legend"
+    }
+}
+
+fn legend_button_control(clicked: bool, secondary_clicked: bool) -> Option<GlobalPlotControl> {
+    if secondary_clicked {
+        Some(GlobalPlotControl::ToggleLegends)
+    } else if clicked {
+        Some(GlobalPlotControl::CycleLegendPosition)
+    } else {
+        None
     }
 }
 
@@ -276,8 +325,11 @@ mod tests {
         let model = GlobalPlotToolbarModel {
             cursor_sampling: SampleMode::Prev,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legend_position: LegendPosition::TopRight,
+            legends_visible: true,
             annotation_toolbar_open: false,
         };
         let input = || egui::RawInput {
@@ -305,19 +357,23 @@ mod tests {
             text.contains("stroke=\"#ffffff\""),
             "icons must use a white stroke so the runtime tint colors them"
         );
-        assert!(text.contains("<path"), "the sigma icon should have geometry");
+        assert!(
+            text.contains("<path"),
+            "the sigma icon should have geometry"
+        );
     }
 
     #[test]
     fn toolbar_actions_are_all_global() {
-        assert_eq!(GlobalPlotControl::ALL.len(), 6);
+        assert_eq!(GlobalPlotControl::ALL.len(), 8);
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("Split"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("FitAll"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("ToggleAllLegends"));
         assert!(!format!("{:?}", GlobalPlotControl::ALL).contains("EqualizePlotHeights"));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleMeasuringMarker));
-        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::OpenFieldStats));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleFieldStats));
         assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleAnnotationToolbar));
+        assert!(GlobalPlotControl::ALL.contains(&GlobalPlotControl::ToggleLegends));
     }
 
     #[test]
@@ -342,12 +398,219 @@ mod tests {
     }
 
     #[test]
-    fn removed_toolbar_controls_keep_palette_commands() {
-        for id in [CommandId::ToggleLegends, CommandId::EqualizePlots] {
-            let routes = id.spec().routes;
-            assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
-            assert!(!routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+    fn the_readout_lock_button_emits_its_command_and_shows_its_state() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let model = |readout_lock| GlobalPlotToolbarModel {
+            cursor_sampling: SampleMode::Prev,
+            playhead_snap: false,
+            readout_lock,
+            measuring_marker: false,
+            field_stats_open: false,
+            legend_position: LegendPosition::TopRight,
+            legends_visible: true,
+            annotation_toolbar_open: false,
+        };
+        let button_node = |output: &egui::FullOutput, label: &str| {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("accesskit is enabled")
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+                })
+                .map(|(_, node)| node.clone())
+        };
+
+        let mut unlocked = None;
+        for _ in 0..3 {
+            let (output, _) = toolbar_frame(&ctx, &model(false), &[], Vec::new());
+            unlocked = button_node(&output, readout_lock_tooltip(false));
         }
+        let bounds = unlocked
+            .expect("the readout lock button belongs to the toolbar")
+            .bounds()
+            .expect("a laid-out button has bounds");
+        let pos = egui::pos2(
+            ((bounds.x0 + bounds.x1) * 0.5) as f32,
+            ((bounds.y0 + bounds.y1) * 0.5) as f32,
+        );
+
+        let _ = toolbar_frame(&ctx, &model(false), &[], click_events(pos, true));
+        let (_, clicked) = toolbar_frame(&ctx, &model(false), &[], click_events(pos, false));
+        assert!(
+            clicked.contains(&AppCommand::Static(CommandId::ToggleReadoutLock)),
+            "clicking the readout lock should emit its command, got {clicked:?}"
+        );
+
+        let mut locked = None;
+        for _ in 0..3 {
+            let (output, _) = toolbar_frame(&ctx, &model(true), &[], Vec::new());
+            locked = button_node(&output, readout_lock_tooltip(true));
+        }
+        assert!(
+            locked.is_some_and(|node| node.toggled() == Some(egui::accesskit::Toggled::True)),
+            "a locked toolbar must show the button as pressed"
+        );
+        assert!(readout_lock_tooltip(false).contains("Lock readouts"));
+        assert_ne!(readout_lock_tooltip(true), readout_lock_tooltip(false));
+    }
+
+    #[test]
+    fn the_field_stats_button_lights_up_while_its_window_is_open() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_extras::install_image_loaders(&ctx);
+        let model = |field_stats_open| GlobalPlotToolbarModel {
+            cursor_sampling: SampleMode::Prev,
+            playhead_snap: false,
+            readout_lock: false,
+            measuring_marker: false,
+            field_stats_open,
+            legend_position: LegendPosition::TopRight,
+            legends_visible: true,
+            annotation_toolbar_open: false,
+        };
+        let toggled = |open| {
+            let mut state = None;
+            for _ in 0..3 {
+                let (output, _) = toolbar_frame(&ctx, &model(open), &[], Vec::new());
+                state = output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .expect("accesskit is enabled")
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.label() == Some("Field stats for every plotted trace")
+                    })
+                    .and_then(|(_, node)| node.toggled());
+            }
+            state
+        };
+
+        assert_eq!(toggled(true), Some(egui::accesskit::Toggled::True));
+        assert_eq!(toggled(false), Some(egui::accesskit::Toggled::False));
+    }
+
+    #[test]
+    fn the_readout_lock_icon_follows_the_tint_convention() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/icons/message-square.svg"
+        ))
+        .expect("the readout lock icon should be bundled");
+        assert!(text.contains("stroke=\"#ffffff\""));
+        assert!(text.contains("<path"));
+    }
+
+    #[test]
+    fn the_readout_lock_is_routed_to_both_the_toolbar_and_the_palette() {
+        let routes = CommandId::ToggleReadoutLock.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+        assert_eq!(
+            command_for_control(GlobalPlotControl::ToggleReadoutLock),
+            AppCommand::Static(CommandId::ToggleReadoutLock)
+        );
+    }
+
+    #[test]
+    fn removed_toolbar_controls_keep_palette_commands() {
+        let routes = CommandId::EqualizePlots.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(!routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+    }
+
+    #[test]
+    fn toggling_legends_is_routed_to_both_the_toolbar_and_the_palette() {
+        let routes = CommandId::ToggleLegends.spec().routes;
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::Palette));
+        assert!(routes.contains(&crate::shell::app::commands::AccessRoute::GlobalToolbar));
+    }
+
+    #[test]
+    fn right_clicking_the_legend_button_toggles_legends_while_left_click_cycles() {
+        assert_eq!(
+            legend_button_control(false, true),
+            Some(GlobalPlotControl::ToggleLegends)
+        );
+        assert_eq!(
+            legend_button_control(true, false),
+            Some(GlobalPlotControl::CycleLegendPosition)
+        );
+        assert_eq!(legend_button_control(false, false), None);
+        assert_eq!(
+            legend_button_control(true, true),
+            Some(GlobalPlotControl::ToggleLegends)
+        );
+        assert_eq!(
+            command_for_control(GlobalPlotControl::ToggleLegends),
+            AppCommand::Static(CommandId::ToggleLegends)
+        );
+    }
+
+    #[test]
+    fn the_legend_icon_button_reports_a_secondary_click() {
+        let ctx = egui::Context::default();
+        let input = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(200.0, 60.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let legend_button = |ui: &mut egui::Ui| {
+            crate::ui::components::icon_button(
+                ui,
+                crate::ui::icons::dice_top_left(),
+                legend_tooltip(true),
+                false,
+            )
+        };
+
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run_ui(input(vec![]), |ui| {
+            rect = legend_button(ui).rect;
+        });
+        let pos = rect.center();
+        let secondary = |pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+
+        let _ = ctx.run_ui(input(secondary(true)), |ui| {
+            let _ = legend_button(ui);
+        });
+        let mut reported = None;
+        let _ = ctx.run_ui(input(secondary(false)), |ui| {
+            let response = legend_button(ui);
+            reported = legend_button_control(response.clicked(), response.secondary_clicked());
+        });
+
+        assert_eq!(reported, Some(GlobalPlotControl::ToggleLegends));
+    }
+
+    #[test]
+    fn the_legend_button_tooltip_announces_the_right_click_toggle() {
+        assert!(legend_tooltip(true).contains("Right-click to hide"));
+        assert!(legend_tooltip(false).contains("Right-click to show"));
+        assert!(legend_tooltip(true).starts_with("Cycle legend position on all plots"));
+        assert!(legend_tooltip(false).starts_with("Cycle legend position on all plots"));
     }
 
     #[test]
@@ -409,8 +672,11 @@ mod tests {
         let model = GlobalPlotToolbarModel {
             cursor_sampling: SampleMode::Prev,
             playhead_snap: false,
+            readout_lock: false,
             measuring_marker: false,
+            field_stats_open: false,
             legend_position: LegendPosition::TopLeft,
+            legends_visible: true,
             annotation_toolbar_open: false,
         };
         let presentations = crate::shell::app::commands::present_commands(
@@ -427,12 +693,7 @@ mod tests {
             .find_map(|shape| find_text_rect(&shape.shape, "Cursor: Previous"))
             .expect("cursor toolbar menu should be painted");
         let cursor_pos = cursor_rect.center();
-        let _ = toolbar_frame(
-            &ctx,
-            &model,
-            &presentations,
-            click_events(cursor_pos, true),
-        );
+        let _ = toolbar_frame(&ctx, &model, &presentations, click_events(cursor_pos, true));
         let _ = toolbar_frame(
             &ctx,
             &model,
@@ -446,12 +707,7 @@ mod tests {
             .find_map(|shape| find_text_rect(&shape.shape, "Linear"))
             .expect("sampling menu choice should be painted");
         let linear_pos = linear_rect.center();
-        let _ = toolbar_frame(
-            &ctx,
-            &model,
-            &presentations,
-            click_events(linear_pos, true),
-        );
+        let _ = toolbar_frame(&ctx, &model, &presentations, click_events(linear_pos, true));
         let (_, commands) = toolbar_frame(
             &ctx,
             &model,
@@ -459,6 +715,9 @@ mod tests {
             click_events(linear_pos, false),
         );
 
-        assert_eq!(commands, [AppCommand::SetCursorSampling(SampleMode::Linear)]);
+        assert_eq!(
+            commands,
+            [AppCommand::SetCursorSampling(SampleMode::Linear)]
+        );
     }
 }

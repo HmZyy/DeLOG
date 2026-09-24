@@ -9,9 +9,7 @@ use delog_core::time::TimeRange;
 use delog_parquet_format::{ValidatedManifest, ValidatedTopic, resolved_topic_names};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 
-use super::{
-    PARQUET_BATCH_ROWS, SeekChunkReader, cancellation_error, parse_arrow_error,
-};
+use super::{PARQUET_BATCH_ROWS, SeekChunkReader, cancellation_error, parse_arrow_error};
 use crate::parser::ParseError;
 
 struct TopicState {

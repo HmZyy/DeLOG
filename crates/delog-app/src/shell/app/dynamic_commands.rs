@@ -2,6 +2,7 @@
 pub enum DynamicFamily {
     Parser,
     Script,
+    Sequence,
     Layout,
     LiveLink,
 }
@@ -10,6 +11,7 @@ pub const fn dynamic_command_families() -> &'static [DynamicFamily] {
     &[
         DynamicFamily::Parser,
         DynamicFamily::Script,
+        DynamicFamily::Sequence,
         DynamicFamily::Layout,
         DynamicFamily::LiveLink,
     ]

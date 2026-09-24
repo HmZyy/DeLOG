@@ -195,9 +195,7 @@ pub fn ui(
                 egui::ScrollArea::vertical()
                     .max_width(content_max_size.x)
                     .max_height(content_max_size.y)
-                    .min_scrolled_height(
-                        content_max_size.y.min(64.0).max(MIN_LEGEND_CONTENT_EXTENT),
-                    )
+                    .min_scrolled_height(content_max_size.y.clamp(MIN_LEGEND_CONTENT_EXTENT, 64.0))
                     .show(ui, |ui| {
                         apply_legend_row_metrics(ui);
                         for (field, label) in labels {
@@ -501,10 +499,7 @@ mod tests {
 
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             super::apply_legend_row_metrics(ui);
-            actual = egui::vec2(
-                ui.spacing().interact_size.y,
-                ui.spacing().item_spacing.y,
-            );
+            actual = egui::vec2(ui.spacing().interact_size.y, ui.spacing().item_spacing.y);
         });
 
         let tokens = crate::ui::design_tokens::DesignTokens::from_style(&ctx.global_style());

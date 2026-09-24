@@ -65,7 +65,7 @@ fn show_rail(
 
     if state.profiles.is_empty() {
         ui.add_space(tokens.space_md);
-        ui.label(egui::RichText::new("No saved profiles").weak());
+        ui.label(egui::RichText::new(crate::ui::empty::no_saved("profiles")).weak());
         ui.label(
             egui::RichText::new("Save a configured vehicle as a profile to reuse it.")
                 .weak()

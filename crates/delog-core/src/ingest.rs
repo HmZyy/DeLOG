@@ -22,6 +22,9 @@ pub const METRIC_DROPPED_BATCHES: &str = "ingest_dropped_batches";
 /// saturated link reports without flooding the channel it is already starving.
 const DROP_DIAG_INTERVAL: u64 = 256;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestDisconnected;
+
 /// A parsed slice of one topic: sorted i64 µs timestamps plus original-dtype
 /// Arrow columns.
 #[derive(Debug, Clone)]
@@ -67,6 +70,9 @@ pub struct ParseSummary {
 
 #[derive(Debug)]
 pub enum IngestMsg {
+    PublicationBarrier {
+        reply: SyncSender<Result<(), String>>,
+    },
     /// The single-writer ingest thread assigns the dense `SourceId`, returned on `reply`.
     OpenSource {
         key: String,
@@ -127,6 +133,14 @@ pub fn ingest_channel() -> (IngestSender, IngestReceiver) {
 }
 
 impl IngestSender {
+    pub fn publication_barrier(&self) -> Result<Receiver<Result<(), String>>, String> {
+        let (reply, receipt) = sync_channel(1);
+        self.tx
+            .send(IngestMsg::PublicationBarrier { reply })
+            .map_err(|e| e.to_string())?;
+        Ok(receipt)
+    }
+
     /// Blocking: a full channel parks the caller until the ingest thread drains.
     pub fn file_sink(&self) -> ChannelSink {
         ChannelSink {
@@ -141,11 +155,14 @@ impl IngestSender {
             .send(IngestMsg::SetSourceOffset { source, offset_us });
     }
 
-    pub fn set_source_offsets(&self, offsets: Vec<(SourceId, i64)>) -> Result<(), ()> {
+    pub fn set_source_offsets(
+        &self,
+        offsets: Vec<(SourceId, i64)>,
+    ) -> Result<(), IngestDisconnected> {
         if !offsets.is_empty() {
             self.tx
                 .send(IngestMsg::SetSourceOffsets { offsets })
-                .map_err(|_| ())?;
+                .map_err(|_| IngestDisconnected)?;
         }
         Ok(())
     }
