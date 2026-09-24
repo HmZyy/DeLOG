@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use delog_api::catalog::{
     TopicMatch, candidate_topic_paths, find_fields_in_topic, find_topics, materialize_field,
 };
-use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
-use delog_core::identity::SourceId;
-use delog_core::snapshot::StoreSnapshot;
-
-use crate::operations::{
+use delog_api::operations::{
     MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
     TransformSpec,
 };
+use delog_core::derived::{PendingColumn, PendingField, PendingTopic};
+use delog_core::identity::SourceId;
+use delog_core::snapshot::StoreSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamKey {
@@ -625,7 +624,9 @@ pub fn prepare_snapshot(
     specs: &[OperationSpec],
 ) -> Result<SnapshotOperationOutput, String> {
     let mut out = SnapshotOperationOutput::default();
-    out.registry.preclaim_static(specs)?;
+    out.registry
+        .preclaim_static(specs)
+        .map_err(delog_api::Error::into_message)?;
     for (index, spec) in specs.iter().enumerate() {
         let first_topic = out.topics.len();
         match spec {
@@ -650,7 +651,9 @@ pub fn prepare_snapshot(
                 (topic.name.clone(), Some(schema))
             })
             .collect::<Vec<_>>();
-        out.registry.claim_batch(index, &claims)?;
+        out.registry
+            .claim_batch(index, &claims)
+            .map_err(delog_api::Error::into_message)?;
     }
     Ok(out)
 }
@@ -668,7 +671,7 @@ mod tests {
     use delog_core::snapshot::StoreSnapshot;
     use delog_core::store::TopicStore;
 
-    use crate::operations::{
+    use delog_api::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
     };
     use delog_core::derived::{PendingColumn, PendingTopic};

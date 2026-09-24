@@ -4,6 +4,9 @@ use std::rc::Rc;
 
 use arrow::datatypes::DataType;
 use delog_api::catalog::topic_matches;
+use delog_api::operations::{
+    MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
+};
 use delog_core::derived::{PendingColumn, PendingTopic};
 use delog_core::field_view::{array_row_as_f64, array_row_as_str};
 use delog_core::identity::{SourceId, parse_topic_instance};
@@ -12,9 +15,6 @@ use delog_core::ingest::ParsedBatch;
 use crate::emit::prepare_topics;
 use crate::operations::snapshot::{
     MergeSeed, SeedField, StreamKey, pending_topic, slice_column, split_key,
-};
-use crate::operations::{
-    MergeSpec, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector, TransformSpec,
 };
 
 type EmittedSchema = Vec<(String, DataType, Option<String>)>;
@@ -389,7 +389,8 @@ impl ActiveOperation {
             .collect::<Vec<_>>();
         self.registry
             .borrow_mut()
-            .claim_batch(self.operation_index, &claims)?;
+            .claim_batch(self.operation_index, &claims)
+            .map_err(delog_api::Error::into_message)?;
         for (topic, schema) in schemas {
             self.emitted_schemas.entry(topic).or_insert(schema);
         }
@@ -912,7 +913,7 @@ mod tests {
     use delog_core::schema::{FieldSchema, TopicSchema};
 
     use crate::operations::snapshot::{MergeSeed, SeedField, StreamKey};
-    use crate::operations::{
+    use delog_api::operations::{
         MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicRegistry, TopicSelector,
         TransformSpec,
     };

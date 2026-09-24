@@ -7,6 +7,9 @@ use delog_api::catalog::{
 };
 use delog_api::control::{ControlRequest, MarkerRequest, PlotContext, ScriptOwner};
 use delog_api::markers::PendingMarker;
+use delog_api::operations::{
+    MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
+};
 use delog_api::params::{ParamKind, ParamSpec, ParamValue, SharedParams};
 use delog_api::timestamps::{AlignmentMode, align_values};
 use delog_core::derived::{PendingField, PendingTopic};
@@ -21,10 +24,6 @@ use pyo3::types::PyTuple;
 use pyo3::types::{PyMapping, PyMappingMethods};
 
 use crate::live::LiveTransformSpec;
-use crate::operations::{
-    MergeSpec, OperationMode, OperationSpec, SplitBySpec, TopicSelector, TransformSpec,
-    merged_field_names, validate_split_template, validate_transform,
-};
 use crate::staging::{
     EmitBuffer, LiveTransformBuffer, MarkerBuffer, OperationBuffer, PendingLiveTransform,
     active_marker_buffer,
@@ -507,37 +506,25 @@ impl Delog {
         mode: &str,
     ) -> PyResult<()> {
         let units = units.unwrap_or_default();
-        validate_transform(multiplier, offset, unit.as_deref(), &units)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        if matches!(&fields, Some(fields) if fields.is_empty()) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "transform fields must not be empty",
-            ));
-        }
-        if output_topic.as_deref() == Some("") {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "transform output_topic must not be empty",
-            ));
-        }
-        let output_topic = output_topic.unwrap_or_else(|| topic.clone());
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = TransformSpec::new(
+            TopicSelector {
+                topic,
+                source,
+                instance,
+            },
+            multiplier,
+            offset,
+            fields,
+            unit,
+            units,
+            output_topic,
+            mode,
+        )
+        .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::Transform(TransformSpec {
-                input: TopicSelector {
-                    topic,
-                    source,
-                    instance,
-                },
-                multiplier,
-                offset,
-                fields,
-                unit,
-                units,
-                output_topic,
-                mode,
-            }));
+            .push(OperationSpec::Transform(spec));
         Ok(())
     }
 
@@ -550,11 +537,6 @@ impl Delog {
         source: Option<String>,
         mode: &str,
     ) -> PyResult<()> {
-        if topics.is_empty()? {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "merge topics must not be empty",
-            ));
-        }
         let mut ordered_topics = Vec::with_capacity(topics.len()?);
         for item in topics.items()?.iter() {
             let item = item.cast::<PyTuple>()?;
@@ -566,46 +548,14 @@ impl Delog {
                     "merge topic '{topic}' fields must be a list of strings"
                 ))
             })?;
-            if fields.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "merge topic '{topic}' fields must not be empty"
-                )));
-            }
             ordered_topics.push((topic, fields));
         }
-        if !ordered_topics.iter().any(|(topic, _)| topic == &base_topic) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "merge base_topic '{base_topic}' must be present in topics"
-            )));
-        }
-        let borrowed = ordered_topics
-            .iter()
-            .map(|(topic, fields)| {
-                (
-                    topic.as_str(),
-                    fields.iter().map(String::as_str).collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let flat_names =
-            merged_field_names(&borrowed).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let mut names = flat_names.into_iter();
-        let output_names = ordered_topics
-            .iter()
-            .map(|(_, fields)| names.by_ref().take(fields.len()).collect::<Vec<_>>())
-            .collect();
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = MergeSpec::new(ordered_topics, base_topic, output_topic, source, mode)
+            .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::Merge(MergeSpec {
-                topics: ordered_topics,
-                base_topic,
-                output_topic,
-                source,
-                output_names,
-                mode,
-            }));
+            .push(OperationSpec::Merge(spec));
         Ok(())
     }
 
@@ -621,29 +571,22 @@ impl Delog {
         instance: Option<u32>,
         mode: &str,
     ) -> PyResult<()> {
-        if matches!(&fields, Some(fields) if fields.is_empty()) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "split_by fields must not be empty",
-            ));
-        }
-        let output_template = output_topic.unwrap_or_else(|| "{topic}/{value}".to_owned());
-        validate_split_template(&output_template)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let mode = Some(mode);
-        let mode = OperationMode::parse(mode).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mode = OperationMode::parse(Some(mode)).map_err(crate::errors::value)?;
+        let spec = SplitBySpec::new(
+            TopicSelector {
+                topic,
+                source,
+                instance,
+            },
+            field,
+            fields,
+            output_topic,
+            mode,
+        )
+        .map_err(crate::errors::value)?;
         self.operations
             .borrow_mut()
-            .push(OperationSpec::SplitBy(SplitBySpec {
-                input: TopicSelector {
-                    topic,
-                    source,
-                    instance,
-                },
-                field,
-                fields,
-                output_template,
-                mode,
-            }));
+            .push(OperationSpec::SplitBy(spec));
         Ok(())
     }
 
@@ -1097,8 +1040,8 @@ impl DelogField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::{OperationMode, OperationSpec};
     use crate::staging::OperationBuffer;
+    use delog_api::operations::{OperationMode, OperationSpec};
 
     fn test_delog_with_markers(markers: MarkerBuffer) -> Delog {
         Delog::new(
@@ -1377,7 +1320,7 @@ delog.split_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn invalid_declarative_calls_do_not_register_partial_specs() {
+    fn invalid_declarative_methods_do_not_register_partial_specs() {
         Python::attach(|py| {
             let operations = OperationBuffer::default();
             let delog = Bound::new(
@@ -1422,7 +1365,7 @@ delog.split_by("PARAM_VALUE", "param_id")
     }
 
     #[test]
-    fn transform_rejects_explicit_empty_output_topic_without_registering() {
+    fn declarative_methods_reject_explicit_empty_output_topic_without_registering() {
         Python::attach(|py| {
             let operations = OperationBuffer::default();
             let delog = Bound::new(

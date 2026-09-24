@@ -2,11 +2,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use delog_api::markers::PendingMarker;
+use delog_api::operations::OperationSpec;
 use delog_core::derived::PendingTopic;
 use pyo3::prelude::*;
 
 use crate::live::LiveTransformSpec;
-use crate::operations::OperationSpec;
 
 pub type EmitBuffer = Rc<RefCell<Vec<PendingTopic>>>;
 pub type OperationBuffer = Rc<RefCell<Vec<OperationSpec>>>;
