@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use delog_api::control::{ControlHost, ControlRequest, GenerationRequest, MarkerRequest};
+use delog_api::live::{
+    LiveTransformBatch, LiveTransformResult, LiveTransformSpec, result_to_batch,
+};
 use delog_api::markers::PendingMarker;
 use delog_api::operations::OperationSpec;
 use delog_api::operations::live::ActiveOperation;
@@ -26,9 +29,7 @@ use crate::api::Delog;
 use crate::custom_parser::{
     ParserOutput, emit_parser_output, parse_python_result, read_float32_file,
 };
-use crate::live::{
-    LiveBatchPy, LiveTransformBatch, LiveTransformSpec, parse_transform_result, result_to_batch,
-};
+use crate::live::{LiveBatchPy, parse_transform_result};
 
 const LIVE_TRANSFORM_ERROR_LIMIT: u8 = 3;
 const CONSOLE_SCRIPT_NAME: &str = "console";
@@ -507,7 +508,7 @@ impl ScriptEngine {
     }
 
     #[cfg(test)]
-    pub fn transform_specs(&self) -> Vec<crate::live::LiveTransformSpec> {
+    pub fn transform_specs(&self) -> Vec<LiveTransformSpec> {
         self.active_live
             .lock()
             .unwrap()
@@ -904,23 +905,22 @@ fn run_one_transform(
     let _marker_override =
         crate::staging::override_marker_buffer(std::rc::Rc::clone(&transform.markers));
     let result = (|| {
-        let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)?;
+        let materialized = LiveTransformBatch::from_parsed(&transform.spec, batch)
+            .map_err(delog_api::Error::into_message)?;
         let input_times = materialized.times.clone();
         crate::context::set_current_script(Some(transform.spec.script_name.clone()));
-        let results = Python::attach(
-            |py| -> Result<Vec<crate::live::LiveTransformResult>, String> {
-                let py_batch = LiveBatchPy::from_materialized(py, materialized)
-                    .and_then(|b| Bound::new(py, b))
-                    .map_err(|e| format_pyerr(py, &e))?;
-                let ret = transform
-                    .callable
-                    .bind(py)
-                    .call1((py_batch,))
-                    .map_err(|e| format_pyerr(py, &e))?;
-                parse_transform_result(py, &transform.spec, &input_times, &ret)
-                    .map_err(|e| format_pyerr(py, &e))
-            },
-        );
+        let results = Python::attach(|py| -> Result<Vec<LiveTransformResult>, String> {
+            let py_batch = LiveBatchPy::from_materialized(py, materialized)
+                .and_then(|b| Bound::new(py, b))
+                .map_err(|e| format_pyerr(py, &e))?;
+            let ret = transform
+                .callable
+                .bind(py)
+                .call1((py_batch,))
+                .map_err(|e| format_pyerr(py, &e))?;
+            parse_transform_result(py, &transform.spec, &input_times, &ret)
+                .map_err(|e| format_pyerr(py, &e))
+        });
         crate::context::set_current_script(None);
         let results = results?;
 
@@ -950,7 +950,8 @@ fn run_one_transform(
         let batches = results
             .into_iter()
             .map(|r| result_to_batch(transform.source, r))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<delog_api::Result<Vec<_>>>()
+            .map_err(delog_api::Error::into_message)?;
 
         // Record only now that the whole batch validated: a failed batch must not
         // pin a topic's field set from a partial or since-rejected result.
@@ -1103,7 +1104,7 @@ fn handle_command(
                         let declared_snapshot =
                             !emit.borrow().is_empty() || operation_wants_snapshot;
                         let has_topics = !emit.borrow().is_empty();
-                        let prepared_topics = crate::emit::prepare_topics(&emit.borrow());
+                        let prepared_topics = prepare_topics(&emit.borrow());
                         let installation = prepared_topics.and_then(|prepared_topics| {
                             install_declarative_generation(
                                 &name,
