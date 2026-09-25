@@ -1,0 +1,123 @@
+name: External API
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/delog-api/**
+      - crates/delog-core/**
+      - crates/delog-remote/**
+      - crates/delog-app/**
+      - python/delog-client/**
+      - scripts/external/**
+      - docs/external_python_api.md
+      - packaging/**
+      - .github/workflows/external-api.yml
+      - .github/workflows/release.yml
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/delog-api/**
+      - crates/delog-core/**
+      - crates/delog-remote/**
+      - crates/delog-app/**
+      - python/delog-client/**
+      - scripts/external/**
+      - docs/external_python_api.md
+      - packaging/**
+      - .github/workflows/external-api.yml
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "3"
+
+jobs:
+  verify:
+    name: verify ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system libraries (eframe/wgpu, serialport)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libudev-dev
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Prepare log directory
+        run: mkdir -p logs
+
+      - name: Platform discovery security gates
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            gates="windows_discovery_dacl_grants_only_the_user_system_and_administrators"
+          else
+            gates="unix_discovery_state_is_private_to_the_current_uid discovery_files_are_private_and_removed_on_drop unix_publication_refuses_group_or_other_writable_directories unix_publication_refuses_directories_owned_by_another_uid"
+          fi
+          gates="$gates startup_removes_only_private_descriptors_of_dead_processes default_root_follows_the_platform_path_contract"
+          cargo test --locked -p delog-remote --test discovery -- --exact $gates 2>&1 | tee logs/discovery-gates.log
+          for gate in $gates; do
+            if ! grep -q "test $gate ... ok" logs/discovery-gates.log; then
+              echo "::error::security gate $gate did not run and pass"
+              exit 1
+            fi
+          done
+
+      - name: Rust tests
+        run: cargo test --locked -p delog-api -p delog-core -p delog-remote -p delog-app 2>&1 | tee logs/rust-tests.log
+
+      - name: Rust tests without embedded scripting
+        run: cargo test --locked -p delog-app --no-default-features 2>&1 | tee logs/rust-tests-no-scripting.log
+
+      - name: Sync the locked Python environment
+        run: uv sync --locked --project python/delog-client --extra test
+
+      - name: Python client tests
+        run: uv run --locked --project python/delog-client --extra test pytest python/delog-client/tests -q 2>&1 | tee logs/python-tests.log
+
+      - name: Build wheel and sdist
+        run: uv build --project python/delog-client
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-api-logs-${{ matrix.os }}
+          path: logs/
+          if-no-files-found: ignore
+
+      - name: Upload Python artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-client-${{ matrix.os }}
+          path: |
+            python/delog-client/dist/*.whl
+            python/delog-client/dist/*.tar.gz
+          if-no-files-found: error
