@@ -1,5 +1,8 @@
 //! Shared construction and ingestion of derived topics.
 
+use std::collections::HashSet;
+use std::error::Error;
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
@@ -8,6 +11,200 @@ use arrow::datatypes::DataType;
 use crate::identity::SourceId;
 use crate::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use crate::schema::{FieldSchema, TopicSchema};
+use crate::store::TopicStore;
+
+#[derive(Debug, Clone)]
+pub struct PreparedDerivedSource {
+    topics: Vec<Arc<TopicStore>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DerivedCommit {
+    pub key: String,
+    pub provenance: DerivedProvenance,
+    pub previous: Option<SourceId>,
+    pub source: PreparedDerivedSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedProvenance {
+    pub owner: String,
+    pub logical_topic: String,
+    pub generation: u64,
+    pub commit_nonce: [u8; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedCommitReceipt {
+    pub source: SourceId,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedCommitError {
+    EmptySource,
+    EmptyKey,
+    EmptyOwner,
+    EmptyLogicalTopic,
+    ZeroGeneration,
+    EmptyTopicName,
+    EmptyFieldName { topic: String },
+    DuplicateTopicName(String),
+    DuplicateFieldName { topic: String, field: String },
+    UnsupportedDataType { topic: String, field: String },
+    SourceKeyInUse(String),
+    PreviousSourceNotLive(SourceId),
+    PreviousSourceNotDerived(SourceId),
+    PreviousSourceMismatch(SourceId),
+    SourceNotLive(SourceId),
+    SourceNotDerived(SourceId),
+    SnapshotBuild(String),
+    StorePublish(String),
+}
+
+impl PreparedDerivedSource {
+    pub fn try_new(
+        topics: impl IntoIterator<Item = Arc<TopicStore>>,
+    ) -> Result<Self, DerivedCommitError> {
+        let topics: Vec<_> = topics.into_iter().collect();
+        if topics.is_empty() || topics.iter().all(|topic| topic.is_empty()) {
+            return Err(DerivedCommitError::EmptySource);
+        }
+
+        let mut topic_names = HashSet::with_capacity(topics.len());
+        for topic in &topics {
+            let topic_name = topic.schema.name();
+            if topic_name.is_empty() {
+                return Err(DerivedCommitError::EmptyTopicName);
+            }
+            if !topic_names.insert(topic_name.to_owned()) {
+                return Err(DerivedCommitError::DuplicateTopicName(
+                    topic_name.to_owned(),
+                ));
+            }
+
+            let mut field_names = HashSet::with_capacity(topic.schema.len());
+            for field in topic.schema.fields() {
+                if field.name.is_empty() {
+                    return Err(DerivedCommitError::EmptyFieldName {
+                        topic: topic_name.to_owned(),
+                    });
+                }
+                if !field_names.insert(field.name.clone()) {
+                    return Err(DerivedCommitError::DuplicateFieldName {
+                        topic: topic_name.to_owned(),
+                        field: field.name.clone(),
+                    });
+                }
+                if !supported_derived_dtype(&field.dtype) {
+                    return Err(DerivedCommitError::UnsupportedDataType {
+                        topic: topic_name.to_owned(),
+                        field: field.name.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(Self { topics })
+    }
+
+    pub fn topics(&self) -> &[Arc<TopicStore>] {
+        &self.topics
+    }
+}
+
+impl DerivedCommit {
+    pub(crate) fn validate(&self) -> Result<(), DerivedCommitError> {
+        if self.key.trim().is_empty() {
+            return Err(DerivedCommitError::EmptyKey);
+        }
+        if self.provenance.owner.trim().is_empty() {
+            return Err(DerivedCommitError::EmptyOwner);
+        }
+        if self.provenance.logical_topic.trim().is_empty() {
+            return Err(DerivedCommitError::EmptyLogicalTopic);
+        }
+        if self.provenance.generation == 0 {
+            return Err(DerivedCommitError::ZeroGeneration);
+        }
+        Ok(())
+    }
+}
+
+fn supported_derived_dtype(dtype: &DataType) -> bool {
+    matches!(
+        dtype,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Boolean
+            | DataType::Utf8
+            | DataType::LargeUtf8
+    )
+}
+
+impl fmt::Display for DerivedCommitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptySource => write!(f, "derived source must contain at least one row"),
+            Self::EmptyKey => write!(f, "derived source key must not be empty"),
+            Self::EmptyOwner => write!(f, "derived source owner must not be empty"),
+            Self::EmptyLogicalTopic => write!(f, "derived logical topic must not be empty"),
+            Self::ZeroGeneration => write!(f, "derived generation must be nonzero"),
+            Self::EmptyTopicName => write!(f, "derived topic name must not be empty"),
+            Self::EmptyFieldName { topic } => {
+                write!(f, "derived topic `{topic}` contains an empty field name")
+            }
+            Self::DuplicateTopicName(topic) => {
+                write!(f, "duplicate derived topic name `{topic}`")
+            }
+            Self::DuplicateFieldName { topic, field } => {
+                write!(
+                    f,
+                    "duplicate field name `{field}` in derived topic `{topic}`"
+                )
+            }
+            Self::UnsupportedDataType { topic, field } => {
+                write!(f, "unsupported dtype for derived field `{topic}/{field}`")
+            }
+            Self::SourceKeyInUse(key) => write!(f, "derived source key `{key}` is already live"),
+            Self::PreviousSourceNotLive(source) => {
+                write!(f, "previous derived source {source:?} is not live")
+            }
+            Self::PreviousSourceNotDerived(source) => {
+                write!(
+                    f,
+                    "previous source {source:?} is not an external derived source"
+                )
+            }
+            Self::PreviousSourceMismatch(source) => {
+                write!(
+                    f,
+                    "previous derived source {source:?} belongs to another publication"
+                )
+            }
+            Self::SourceNotLive(source) => write!(f, "derived source {source:?} is not live"),
+            Self::SourceNotDerived(source) => {
+                write!(f, "source {source:?} is not an external derived source")
+            }
+            Self::SnapshotBuild(message) => {
+                write!(f, "failed to build derived snapshot: {message}")
+            }
+            Self::StorePublish(message) => {
+                write!(f, "failed to publish derived snapshot: {message}")
+            }
+        }
+    }
+}
+
+impl Error for DerivedCommitError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingColumn {

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use arrow::array::{ArrayRef, Int64Array};
 
+use crate::derived::{DerivedCommit, DerivedCommitError, DerivedCommitReceipt};
 use crate::diagnostics::Diag;
 pub use crate::identity::SourceKind;
 use crate::identity::{SourceId, SourceMetadata};
@@ -100,6 +101,14 @@ pub enum IngestMsg {
     RemoveSource {
         source: SourceId,
     },
+    CommitDerived {
+        commit: DerivedCommit,
+        reply: SyncSender<Result<DerivedCommitReceipt, DerivedCommitError>>,
+    },
+    RemoveSourceWait {
+        source: SourceId,
+        reply: SyncSender<Result<u64, DerivedCommitError>>,
+    },
     RelabelSource {
         source: SourceId,
         label: String,
@@ -169,6 +178,29 @@ impl IngestSender {
 
     pub fn remove_source(&self, source: SourceId) {
         let _ = self.tx.send(IngestMsg::RemoveSource { source });
+    }
+
+    pub fn commit_derived(
+        &self,
+        commit: DerivedCommit,
+    ) -> Result<Receiver<Result<DerivedCommitReceipt, DerivedCommitError>>, IngestDisconnected>
+    {
+        let (reply, receipt) = sync_channel(1);
+        self.tx
+            .send(IngestMsg::CommitDerived { commit, reply })
+            .map_err(|_| IngestDisconnected)?;
+        Ok(receipt)
+    }
+
+    pub fn remove_source_wait(
+        &self,
+        source: SourceId,
+    ) -> Result<Receiver<Result<u64, DerivedCommitError>>, IngestDisconnected> {
+        let (reply, receipt) = sync_channel(1);
+        self.tx
+            .send(IngestMsg::RemoveSourceWait { source, reply })
+            .map_err(|_| IngestDisconnected)?;
+        Ok(receipt)
     }
 
     pub fn relabel_source(&self, source: SourceId, label: impl Into<String>) {
