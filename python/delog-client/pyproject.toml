@@ -1,0 +1,70 @@
+[project]
+name = "delog-client"
+version = "0.1.0"
+description = "Synchronous Python client for reading DeLOG snapshots over its loopback API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "DeLOG contributors" }]
+keywords = ["delog", "flight-logs", "telemetry", "arrow"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28.1,<1",
+  "pyarrow>=22",
+]
+
+[project.urls]
+Homepage = "https://github.com/HmZyy/DeLOG"
+Repository = "https://github.com/HmZyy/DeLOG"
+Documentation = "https://github.com/HmZyy/DeLOG/blob/main/docs/external_python_api.md"
+Issues = "https://github.com/HmZyy/DeLOG/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<10"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+reproducible = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/delog_client"]
+exclude = ["**/__pycache__"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/delog_client", "README.md", "pyproject.toml"]
+exclude = ["**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B010"]
+
+[tool.ruff.lint.isort]
+known-local-folder = ["conftest"]
