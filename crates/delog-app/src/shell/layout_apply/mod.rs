@@ -1,3 +1,4 @@
+use delog_api::control::ResourceOwner;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use delog_core::diagnostics::Diag;
@@ -136,6 +137,7 @@ pub fn current_doc(input: CurrentLayout<'_>) -> LayoutDoc {
             .windows
             .iter()
             .map(|window| WindowLayout {
+                owner: window.owner.as_ref().map(|owner| owner.name.clone()),
                 id: Some(window.id.0),
                 title: window.title.clone(),
                 size: window.size,
@@ -156,6 +158,7 @@ fn workspace_doc(workspace: &Workspace, snapshot: &StoreSnapshot) -> WorkspaceLa
         .root()
         .and_then(|id| node_to_layout(workspace, snapshot, id))
         .unwrap_or(LayoutNode::Plot {
+            owner: None,
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
@@ -171,6 +174,7 @@ fn node_to_layout(
 ) -> Option<LayoutNode> {
     match workspace.tree.tiles.get(tile)? {
         egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(LayoutNode::Plot {
+            owner: pane.owner.as_ref().map(|owner| owner.name.clone()),
             traces: pane
                 .traces
                 .iter()
@@ -215,6 +219,7 @@ fn node_to_layout(
 
 fn trace_to_layout(trace: &TraceRef, snapshot: &StoreSnapshot) -> Option<TraceLayout> {
     Some(TraceLayout {
+        owner: trace.owner.as_ref().map(|owner| owner.name.clone()),
         field: field_ref(snapshot, trace.field)?,
         color: trace.color,
         width_px: trace.width_px,
@@ -225,6 +230,7 @@ fn trace_to_layout(trace: &TraceRef, snapshot: &StoreSnapshot) -> Option<TraceLa
 
 fn ghost_to_layout(ghost: &GhostTrace) -> TraceLayout {
     TraceLayout {
+        owner: ghost.owner.as_ref().map(|owner| owner.name.clone()),
         field: FieldRef {
             topic: ghost.topic.clone(),
             field: ghost.field.clone(),
@@ -328,6 +334,7 @@ fn apply_doc(
         .zip(ids)
         .map(|(layout, id)| {
             let mut window = ExtendedWindow::restored(id);
+            window.owner = restored_owner(&layout.owner);
             window.title = layout.title.clone();
             window.size = [
                 layout.size[0].max(MIN_WINDOW_SIZE[0]),
@@ -370,6 +377,7 @@ fn apply_doc(
 fn plots_only(node: &LayoutNode) -> LayoutNode {
     match node {
         LayoutNode::Scene3d(_) => LayoutNode::Plot {
+            owner: None,
             traces: Vec::new(),
             show_legend: true,
             show_tooltip: true,
@@ -406,12 +414,14 @@ fn insert_node(
 ) -> Option<egui_tiles::TileId> {
     match node {
         LayoutNode::Plot {
+            owner,
             traces,
             show_legend,
             show_tooltip,
             annotations,
         } => {
             let mut pane = PlotPane {
+                owner: restored_owner(owner),
                 show_legend: *show_legend,
                 show_tooltip: *show_tooltip,
                 ..PlotPane::default()
@@ -495,21 +505,29 @@ fn restore_annotation(pane: &mut PlotPane, layout: &AnnotationLayout, resolver: 
     });
 }
 
+fn restored_owner(name: &Option<String>) -> Option<ResourceOwner> {
+    name.clone().map(|name| ResourceOwner {
+        name,
+        generation: 0,
+    })
+}
+
 fn trace_from_layout(trace: &TraceLayout, resolver: &mut Resolver<'_>) -> Option<TraceRef> {
     Some(TraceRef {
+        instance_id: crate::plotting::plot::next_resource_instance_id(),
         field: resolver.resolve(&trace.field)?,
         color: trace.color,
         width_px: trace.width_px,
         mode: trace.mode.into(),
         visible: trace.visible,
         label_override: None,
-        #[cfg(feature = "scripting")]
-        owner: None,
+        owner: restored_owner(&trace.owner),
     })
 }
 
 fn ghost_from_layout(trace: &TraceLayout) -> GhostTrace {
     GhostTrace {
+        owner: restored_owner(&trace.owner),
         source: None,
         topic: trace.field.topic.clone(),
         field: trace.field.field.clone(),

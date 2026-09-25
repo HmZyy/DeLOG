@@ -12,14 +12,18 @@ impl ControlHost for TwoPlots {
             ControlRequest::Plots(PlotRequest::List { window: None }) => {
                 Ok(ControlResponse::Plots(vec![
                     PlotInfo {
+                        owner: None,
                         window: 0,
                         tile: 7,
+                        instance_id: 1,
                         index: 0,
                         label: "Plot 1".into(),
                     },
                     PlotInfo {
+                        owner: None,
                         window: 0,
                         tile: 9,
+                        instance_id: 1,
                         index: 1,
                         label: "Plot 2".into(),
                     },
@@ -55,8 +59,10 @@ impl ControlHost for TwoWindows {
             ControlRequest::Plots(PlotRequest::List { window }) => {
                 assert_eq!(window, Some(3), "the window filter must reach the app");
                 Ok(ControlResponse::Plots(vec![PlotInfo {
+                    owner: None,
                     window: 3,
                     tile: 11,
+                    instance_id: 1,
                     index: 0,
                     label: "Plot 1".into(),
                 }]))

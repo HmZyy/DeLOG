@@ -30,53 +30,66 @@ impl ControlHost for Recorder {
     fn call(&self, request: ControlRequest) -> delog_api::Result<ControlResponse> {
         self.seen.lock().unwrap().push(request.clone());
         match request {
-            ControlRequest::Vehicles(VehicleRequest::List) => Ok(ControlResponse::Vehicles(
-                self.vehicles.lock().unwrap().clone(),
-            )),
-            ControlRequest::Vehicles(VehicleRequest::Add(spec)) => {
-                let mut next_id = self.next_id.lock().unwrap();
-                *next_id += 1;
-                let mut vehicles = self.vehicles.lock().unwrap();
-                let info = VehicleInfo {
-                    id: *next_id,
-                    index: vehicles.len(),
-                    spec,
-                };
-                vehicles.push(info.clone());
-                Ok(ControlResponse::Vehicles(vec![info]))
-            }
-            ControlRequest::Vehicles(VehicleRequest::Set { id, patch }) => {
-                let mut vehicles = self.vehicles.lock().unwrap();
-                let info = vehicles
-                    .iter_mut()
-                    .find(|info| info.id == id)
-                    .ok_or_else(|| delog_api::Error::execution(format!("vehicle {id} is gone")))?;
-                apply_patch(info, patch);
-                Ok(ControlResponse::Vehicles(vec![info.clone()]))
-            }
-            ControlRequest::Vehicles(VehicleRequest::Remove(filter)) => {
-                let mut vehicles = self.vehicles.lock().unwrap();
-                match filter {
-                    VehicleFilter::Id(id) => vehicles.retain(|info| info.id != id),
-                    VehicleFilter::Index(index) => {
-                        if index >= vehicles.len() {
-                            return Err(delog_api::Error::execution(format!(
-                                "vehicle index {index} is gone"
-                            )));
+            ControlRequest::Vehicles(request) => match *request {
+                VehicleRequest::List => Ok(ControlResponse::Vehicles(
+                    self.vehicles.lock().unwrap().clone(),
+                )),
+                VehicleRequest::Add(spec) => {
+                    let mut next_id = self.next_id.lock().unwrap();
+                    *next_id += 1;
+                    let mut vehicles = self.vehicles.lock().unwrap();
+                    let info = VehicleInfo {
+                        id: *next_id,
+                        index: vehicles.len(),
+                        spec,
+                    };
+                    vehicles.push(info.clone());
+                    Ok(ControlResponse::Vehicles(vec![info]))
+                }
+                VehicleRequest::Set { id, patch } => {
+                    let mut vehicles = self.vehicles.lock().unwrap();
+                    let info = vehicles
+                        .iter_mut()
+                        .find(|info| info.id == id)
+                        .ok_or_else(|| {
+                            delog_api::Error::execution(format!("vehicle {id} is gone"))
+                        })?;
+                    apply_patch(info, patch);
+                    Ok(ControlResponse::Vehicles(vec![info.clone()]))
+                }
+                VehicleRequest::Remove(filter) => {
+                    let mut vehicles = self.vehicles.lock().unwrap();
+                    match filter {
+                        VehicleFilter::Id(id) => vehicles.retain(|info| info.id != id),
+                        VehicleFilter::Index(index) => {
+                            if index >= vehicles.len() {
+                                return Err(delog_api::Error::execution(format!(
+                                    "vehicle index {index} is gone"
+                                )));
+                            }
+                            vehicles.remove(index);
                         }
-                        vehicles.remove(index);
+                        VehicleFilter::Label(label) => {
+                            vehicles.retain(|info| info.spec.label != label)
+                        }
+                        VehicleFilter::Source(source) => {
+                            vehicles.retain(|info| info.spec.source_id != source)
+                        }
+                        VehicleFilter::Owner(owner) => vehicles.retain(|info| {
+                            info.spec
+                                .owner
+                                .as_ref()
+                                .map(|candidate| candidate.name.as_str())
+                                != Some(owner.as_str())
+                        }),
+                        VehicleFilter::All => vehicles.clear(),
                     }
-                    VehicleFilter::Label(label) => vehicles.retain(|info| info.spec.label != label),
-                    VehicleFilter::Source(source) => {
-                        vehicles.retain(|info| info.spec.source_id != source)
+                    for (index, info) in vehicles.iter_mut().enumerate() {
+                        info.index = index;
                     }
-                    VehicleFilter::All => vehicles.clear(),
+                    Ok(ControlResponse::Unit)
                 }
-                for (index, info) in vehicles.iter_mut().enumerate() {
-                    info.index = index;
-                }
-                Ok(ControlResponse::Unit)
-            }
+            },
             _ => Ok(ControlResponse::Unit),
         }
     }
@@ -309,7 +322,10 @@ fn every_vehicle_removal_axis_is_exclusive() {
         .unwrap()
         .iter()
         .filter_map(|request| match request {
-            ControlRequest::Vehicles(VehicleRequest::Remove(filter)) => Some(filter.clone()),
+            ControlRequest::Vehicles(request) => match request.as_ref() {
+                VehicleRequest::Remove(filter) => Some(filter.clone()),
+                _ => None,
+            },
             _ => None,
         })
         .collect();
@@ -338,7 +354,7 @@ fn every_vehicle_removal_axis_is_exclusive() {
             .lock()
             .unwrap()
             .iter()
-            .any(|request| matches!(request, ControlRequest::Vehicles(VehicleRequest::Remove(_))))
+            .any(|request| matches!(request, ControlRequest::Vehicles(inner) if matches!(inner.as_ref(), VehicleRequest::Remove(_))))
     );
 }
 
@@ -366,7 +382,7 @@ fn bad_model_color_and_scale_are_rejected_before_the_host() {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|request| matches!(request, ControlRequest::Vehicles(VehicleRequest::Add(_))))
+                .any(|request| matches!(request, ControlRequest::Vehicles(inner) if matches!(inner.as_ref(), VehicleRequest::Add(_))))
         );
     }
 }
@@ -391,7 +407,7 @@ fn invalid_handle_updates_are_rejected_before_set_reaches_the_host() {
         assert!(error.contains("ValueError"), "{error}");
         assert!(!host.seen.lock().unwrap().iter().any(|request| matches!(
             request,
-            ControlRequest::Vehicles(VehicleRequest::Set { .. })
+            ControlRequest::Vehicles(inner) if matches!(inner.as_ref(), VehicleRequest::Set { .. })
         )));
     }
 }

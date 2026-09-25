@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::config::settings::AutoOpenVariables;
 use crate::ui::logging::{LogLevel, PendingLog, log};
-use delog_api::control::ControlRequest;
+use delog_api::control::{ControlHost, ControlRequest};
 use delog_api::params::{ParamSpec, ParamValue, SharedParams, shared_empty};
 use delog_core::ingest::IngestSender;
 use delog_core::metrics::MetricsRegistry;
@@ -122,8 +122,7 @@ pub struct ScriptsPanel {
     pending_control_batches: Vec<Vec<ControlRequest>>,
     completion: ReplCompletion,
     history: ReplHistory,
-    ctx: egui::Context,
-    control_queue: Option<crate::scripting::control_host::ControlQueue>,
+    control_host: Arc<dyn ControlHost>,
 }
 
 impl ScriptsPanel {
@@ -131,7 +130,7 @@ impl ScriptsPanel {
         scripts_dir: std::path::PathBuf,
         parsers_dir: std::path::PathBuf,
         params_file: std::path::PathBuf,
-        ctx: egui::Context,
+        control_host: Arc<dyn ControlHost>,
     ) -> Self {
         let library = ScriptLibrary::new(scripts_dir);
         let params = shared_empty();
@@ -165,8 +164,7 @@ impl ScriptsPanel {
             pending_control_batches: Vec::new(),
             completion: ReplCompletion::new(),
             history: ReplHistory::new(),
-            ctx,
-            control_queue: None,
+            control_host,
         }
     }
 
@@ -233,10 +231,6 @@ impl ScriptsPanel {
 
     pub fn take_control_batches(&mut self) -> Vec<Vec<ControlRequest>> {
         std::mem::take(&mut self.pending_control_batches)
-    }
-
-    pub fn control_queue(&self) -> Option<&crate::scripting::control_host::ControlQueue> {
-        self.control_queue.as_ref()
     }
 
     pub fn request_interrupt(&self) {
@@ -484,12 +478,10 @@ impl ScriptsPanel {
     ) -> &ScriptEngine {
         let params = Arc::clone(&self.params);
         let use_original_timestamps = self.use_original_timestamps;
-        let ctx = self.ctx.clone();
+        let control_host = Arc::clone(&self.control_host);
         let engine = self.engine.get_or_insert_with(|| {
             let engine = ScriptEngine::spawn(store, sender, metrics, params);
-            let (host, queue) = crate::scripting::control_host::ScriptControlHost::new(ctx);
-            engine.set_control_host(host);
-            self.control_queue = Some(queue);
+            engine.set_control_host(control_host);
             engine
         });
         engine.set_use_original_timestamps(use_original_timestamps);
@@ -1325,6 +1317,21 @@ mod tests {
 
     use super::*;
 
+    struct UnusedControlHost;
+
+    impl ControlHost for UnusedControlHost {
+        fn call(
+            &self,
+            _request: ControlRequest,
+        ) -> delog_api::Result<delog_api::control::ControlResponse> {
+            panic!("this ScriptsPanel test must not issue a control request")
+        }
+    }
+
+    fn test_control_host() -> Arc<dyn ControlHost> {
+        Arc::new(UnusedControlHost)
+    }
+
     #[test]
     fn parser_events_do_not_change_console_running_state() {
         let root = std::env::temp_dir().join(format!(
@@ -1335,7 +1342,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.running = true;
         panel.status = "running console script".into();
@@ -1388,7 +1395,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
 
         panel.handle_event(ScriptEvent::Error("python exploded".into()));
@@ -1408,7 +1415,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.running = true;
         panel.status = "running console script".into();
@@ -1451,7 +1458,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.current_name = "old".into();
         panel.editor_text = "print('old')".into();
@@ -1471,7 +1478,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.library.save("demo", "print('demo')").unwrap();
         panel.library.save("demo_copy", "old copy").unwrap();
@@ -1495,7 +1502,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.library.save("saved", "print('saved')").unwrap();
         panel
@@ -1536,7 +1543,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         let path = PathBuf::from("flight.raw");
         panel.running = true;
@@ -1578,7 +1585,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.parsers.add_new();
         let action = panel.parsers.stage_save().unwrap();
@@ -1610,7 +1617,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.running = false;
         panel.parsers.add_new();
@@ -1635,7 +1642,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
 
         panel.request_repl_refocus();
@@ -1655,7 +1662,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
 
         panel.set_console_open(true);
@@ -1675,7 +1682,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         let first = PathBuf::from("first.raw");
         let second = PathBuf::from("second.raw");
@@ -1712,7 +1719,7 @@ mod tests {
             root.join("scripts"),
             root.clone(),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
 
         assert!(panel.parser_names().is_err());
@@ -1729,7 +1736,7 @@ mod tests {
             temp.path().join("empty-scripts"),
             temp.path().join("empty-parsers"),
             temp.path().join("empty-params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         assert_eq!(
             empty_panel.try_script_names().unwrap(),
@@ -1742,7 +1749,7 @@ mod tests {
             not_a_directory,
             temp.path().join("parsers"),
             temp.path().join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
 
         assert!(panel.try_script_names().is_err());
@@ -1758,7 +1765,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel.parsers.add_new();
         panel.parsers.stage_save().unwrap();
@@ -1784,7 +1791,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         let path = PathBuf::from("flight.raw");
 
@@ -1809,7 +1816,7 @@ mod tests {
             root.join("scripts"),
             root.join("parsers"),
             root.join("params.json"),
-            egui::Context::default(),
+            test_control_host(),
         );
         panel
             .parsers
