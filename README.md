@@ -33,6 +33,9 @@ it in Python - both file parsers and analysis scripts - without recompiling.
   results plot exactly like parsed data, and top-level scripts can control plots,
   annotations, vehicles, markers, and layouts. See
   [docs/scripting.md](docs/scripting.md) and [docs/app_control.md](docs/app_control.md).
+- **External Python API** - opt-in local access for ordinary Python scripts: read snapshots
+  as PyArrow tables, publish derived topics, and drive plots, markers, and vehicles with the
+  typed `delog-client` package. See [docs/external_python_api.md](docs/external_python_api.md).
 - **Visual dataflows** - build and save derived numeric signals with a node graph, no
   Python required. See [docs/dataflow.md](docs/dataflow.md).
 - **Fast WGPU visualization** - GPU-rendered line/scatter/step plots with automatic
@@ -99,6 +102,7 @@ When DéLOG's built-in parsers don't cover a format, add a Python parser under
 - [Dataflow editor](docs/dataflow.md) - visual derived signals, timeline alignment, and publishing.
 - [Scripting](docs/scripting.md) - embedded-Python derived fields, the `delog` API, live transforms.
 - [Python app control](docs/app_control.md) - plots, annotations, vehicles, markers, layouts, and atomic batches.
+- [External Python API](docs/external_python_api.md) - `delog-client`: discovery, snapshots, publication, remote control, and a flight-diagnosis workflow.
 - [Custom parsers](docs/custom_parsers.md) - Python file parsers via `Parse(raw_data)`.
 
 ## License

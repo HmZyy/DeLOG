@@ -8,15 +8,40 @@ derived data. Two rules matter before using this API:
    parsers, and dataflow Python nodes. `delog.add_marker(...)` and
    `delog.markers.add(...)` are the live-callback exception because their
    writes are deferred until the callback succeeds.
-2. A named script owns the traces, annotations, vehicles, and markers it
-   creates. A successful rerun commits the new generation and removes the
-   script's older generation. A failed run rolls back the new generation and
-   preserves the last successful one. Console-created objects persist until
+2. A named script owns the windows, plot panes, traces, annotations, vehicles,
+   and markers it creates. A successful rerun commits the new generation and
+   removes the script's older generation, including its windows and plot
+   panes. A failed run rolls back the new generation, including the windows
+   and plot panes it opened, and preserves the last successful one. Removing
+   a script's resources by owner follows the same rules. An owned window or
+   plot pane that holds any manually added trace or annotation is kept; only
+   its owned content is removed. Console-created objects persist until
    explicitly removed.
 
 Calls are synchronous unless a section says they are deferred. Invalid Python
 arguments raise `ValueError`; a missing/stale UI object, filesystem failure, or
 unavailable control context raises `RuntimeError`.
+
+## Native control boundary
+
+`delog-api` defines the transport-independent control requests and validates
+every request, including requests constructed directly by a Rust caller. The
+app invokes that validation at its control boundary before changing state.
+Native errors retain typed categories such as `InvalidInput`, `StaleHandle`,
+`Forbidden`, `Conflict`, and `Unavailable` as they cross the app service;
+the Python exceptions above are the embedded adapter's presentation of them.
+
+Resource ownership and the bounded UI control queue are always compiled,
+including builds without embedded Python. The app drains control requests in
+its UI update loop, and embedded Python is one adapter to that shared native
+boundary. Script-owned objects carry an owner name and generation; manual
+objects remain unowned.
+
+The [external Python API](external_python_api.md) is a second adapter to the
+same boundary. External programs connect over loopback with `delog-client`,
+their resources are owned by the connection's name (`external/<name>`), and
+safe mode stops them from changing manual objects unless full control is
+confirmed in DéLOG. Embedded scripts are not subject to that switch.
 
 ## Plots and workspace
 

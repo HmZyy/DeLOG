@@ -717,3 +717,61 @@ fn full_access_keeps_a_warning_visible_until_safe_is_restored() {
 }
 
 mod real_app;
+
+#[test]
+fn the_guide_limits_table_matches_the_defaults() {
+    let guide = include_str!("../../../../../docs/external_python_api.md");
+    let table: std::collections::HashMap<&str, &str> = guide
+        .split("## Limits")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            (cells.len() == 4 && !cells[1].starts_with('-') && cells[1] != "Limit")
+                .then(|| (cells[1], cells[2]))
+        })
+        .collect();
+    let limits = ExternalApiLimits::default();
+    let expected = [
+        (
+            "Snapshot idle release",
+            format!("{} s", limits.lease_idle_timeout_secs),
+        ),
+        (
+            "Request timeout",
+            format!("{} s", limits.request_timeout_secs),
+        ),
+        (
+            "Concurrent data downloads",
+            limits.max_concurrent_downloads.to_string(),
+        ),
+        ("Upload size", format!("{} MiB", limits.upload_max_mib)),
+        ("Upload rows", limits.upload_max_rows.to_string()),
+        ("Upload fields", limits.upload_max_fields.to_string()),
+        (
+            "Concurrent uploads",
+            limits.max_concurrent_uploads.to_string(),
+        ),
+        ("Queued controls", limits.max_queued_controls.to_string()),
+        (
+            "Queued controls per client",
+            limits.max_queued_controls_per_client.to_string(),
+        ),
+        (
+            "Control timeout",
+            format!("{} s", limits.control_timeout_secs),
+        ),
+    ];
+    assert_eq!(table.len(), expected.len(), "{table:?}");
+    for (label, value) in expected {
+        assert_eq!(table.get(label).copied(), Some(value.as_str()), "{label}");
+    }
+    assert!(guide.contains(&format!(
+        "after {} minutes without requests",
+        match limits.lease_idle_timeout_secs / 60 {
+            5 => "five".to_owned(),
+            minutes => minutes.to_string(),
+        }
+    )));
+}
