@@ -703,16 +703,18 @@ enum SettingsTab {
     Scene3d,
     Scripting,
     DataFlow,
+    ExternalApi,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Plots,
         Self::Rendering,
         Self::Scene3d,
         Self::Scripting,
         Self::DataFlow,
+        Self::ExternalApi,
     ];
 
     const fn label(self) -> &'static str {
@@ -723,6 +725,7 @@ impl SettingsTab {
             Self::Scene3d => "3D View",
             Self::Scripting => "Scripting",
             Self::DataFlow => "Dataflow",
+            Self::ExternalApi => "External API",
         }
     }
 }
@@ -752,8 +755,16 @@ impl SettingsDialog {
     }
 
     pub fn open_scene3d(&mut self) {
+        self.focus(SettingsTab::Scene3d);
+    }
+
+    pub fn open_external_api(&mut self) {
+        self.focus(SettingsTab::ExternalApi);
+    }
+
+    fn focus(&mut self, tab: SettingsTab) {
         self.open = true;
-        if let Some(path) = self.dock_state.find_tab(&SettingsTab::Scene3d) {
+        if let Some(path) = self.dock_state.find_tab(&tab) {
             let _ = self.dock_state.set_active_tab(path);
         }
     }
@@ -763,6 +774,7 @@ impl SettingsDialog {
         ctx: &egui::Context,
         settings: &mut AppSettings,
         tile_cache: TileCacheUiState,
+        external_api: &mut dyn FnMut(&mut egui::Ui),
     ) -> SettingsChange {
         if !self.open {
             return SettingsChange::default();
@@ -783,6 +795,7 @@ impl SettingsDialog {
                     settings,
                     change: &mut change,
                     tile_cache,
+                    external_api,
                 };
                 egui_dock::DockArea::new(&mut self.dock_state)
                     .id(egui::Id::new("settings_dock_area"))
@@ -804,6 +817,7 @@ struct SettingsTabViewer<'a> {
     settings: &'a mut AppSettings,
     change: &'a mut SettingsChange,
     tile_cache: TileCacheUiState,
+    external_api: &'a mut dyn FnMut(&mut egui::Ui),
 }
 
 impl egui_dock::TabViewer for SettingsTabViewer<'_> {
@@ -833,6 +847,9 @@ impl egui_dock::TabViewer for SettingsTabViewer<'_> {
             }
             SettingsTab::DataFlow => {
                 dataflow_tab(ui, self.settings);
+            }
+            SettingsTab::ExternalApi => {
+                (self.external_api)(ui);
             }
         }
     }
@@ -1423,7 +1440,7 @@ fn dataflow_tab(ui: &mut egui::Ui, settings: &mut AppSettings) {
     }
 }
 
-fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
+pub(crate) fn reset_to_defaults_button(ui: &mut egui::Ui) -> bool {
     ui.add_space(10.0);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.button("Reset to defaults").clicked()
@@ -1502,9 +1519,43 @@ mod tests {
                 "Rendering",
                 "3D View",
                 "Scripting",
-                "Dataflow"
+                "Dataflow",
+                "External API"
             ]
         );
+    }
+
+    #[test]
+    fn the_external_api_tab_draws_the_supplied_body() {
+        let ctx = egui::Context::default();
+        let mut dialog = SettingsDialog::default();
+        dialog.open_external_api();
+        let mut settings = AppSettings::default();
+        let mut drawn = 0;
+        for _ in 0..3 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                dialog.show(
+                    ui.ctx(),
+                    &mut settings,
+                    TileCacheUiState::default(),
+                    &mut |_ui| drawn += 1,
+                );
+            });
+        }
+        assert!(drawn > 0);
+    }
+
+    #[test]
+    fn opening_the_external_api_settings_focuses_its_tab() {
+        let mut dialog = SettingsDialog::default();
+
+        dialog.open_external_api();
+
+        assert!(dialog.is_open());
+        let leaf = dialog.dock_state[egui_dock::SurfaceIndex::main()][egui_dock::NodeIndex::root()]
+            .get_leaf()
+            .expect("the settings tabs share one leaf");
+        assert_eq!(leaf.tabs[leaf.active.0], SettingsTab::ExternalApi);
     }
 
     #[test]

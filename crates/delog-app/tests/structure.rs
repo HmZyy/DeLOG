@@ -24,6 +24,38 @@ fn native_control_queue_and_ownership_are_unconditional() {
     assert!(!app.contains("cfg(feature = \"scripting\")\npub mod control_host"));
 }
 
+#[test]
+fn external_api_controller_and_delog_remote_are_unconditional() {
+    let cargo_toml = include_str!("../Cargo.toml");
+    let dependencies_start = cargo_toml
+        .find("[dependencies]")
+        .expect("delog-app must declare a [dependencies] section");
+    let dependencies_section = &cargo_toml[dependencies_start..];
+    let remote_line = dependencies_section
+        .lines()
+        .find(|line| line.trim_start().starts_with("delog-remote"))
+        .expect("delog-remote must be a delog-app dependency");
+    assert!(
+        remote_line.contains("workspace = true") && !remote_line.contains("optional"),
+        "delog-remote must be an unconditional dependency: {remote_line}"
+    );
+    assert!(
+        !cargo_toml.contains("dep:delog-remote"),
+        "delog-remote must not be gated behind a feature"
+    );
+
+    let shell_mod = include_str!("../src/shell/mod.rs");
+    let lines: Vec<_> = shell_mod.lines().collect();
+    let position = lines
+        .iter()
+        .position(|line| line.trim() == "pub mod external_api;")
+        .expect("external_api must be declared in shell::mod");
+    assert!(
+        position == 0 || !lines[position - 1].trim_start().starts_with("#[cfg("),
+        "external_api must be compiled without a feature gate"
+    );
+}
+
 const LAYER_RANKS: &[(&str, u32)] = &[
     ("ui", 0),
     ("scene3d", 0),

@@ -376,6 +376,13 @@ impl CommandId {
                 ClassicMenu,
                 Palette
             ),
+            OpenExternalApi => spec!(
+                "External API…",
+                Extensions,
+                None,
+                "python local api arrow",
+                Palette
+            ),
             Exit => spec!(
                 "Exit",
                 Application,

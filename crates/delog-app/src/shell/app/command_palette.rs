@@ -224,6 +224,30 @@ mod tests {
     }
 
     #[test]
+    fn external_api_command_keeps_its_label_and_keywords() {
+        assert_eq!(CommandId::OpenExternalApi.spec().label, "External API…");
+        assert_eq!(
+            CommandId::OpenExternalApi.spec().routes,
+            [crate::shell::app::commands::AccessRoute::Palette]
+        );
+        assert_eq!(
+            CommandId::OpenExternalApi.spec().search_terms,
+            "python local api arrow"
+        );
+        let entry = PaletteEntry::from_presentation(
+            CommandPresentation {
+                command: AppCommand::Static(CommandId::OpenExternalApi),
+                label: CommandId::OpenExternalApi.spec().label.to_owned(),
+                shortcut: None,
+                availability: CommandAvailability::Enabled,
+                selected: None,
+            },
+            "",
+        );
+        assert_eq!(entry.label, "External API…");
+    }
+
+    #[test]
     fn palette_ranks_exact_command_before_loose_match() {
         let entries = vec![
             PaletteEntry::enabled(
