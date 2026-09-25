@@ -318,17 +318,28 @@ client.close()
 
 [`scripts/external/flight_diagnosis.py`](../scripts/external/flight_diagnosis.py)
 streams one field, computes the gap between consecutive samples, publishes
-`diagnostic_sample_gaps` with a `gap_ms` field, opens a `Flight diagnosis`
-window with the gap trace, and adds a marker and annotation at each gap above
-the threshold. When no gap exceeds it, the script still publishes the series
-and adds an annotation saying so. It disconnects without cleanup so the
-results stay on screen.
+`diagnostic_sample_gaps` with a `gap_ms` field, plots the gap trace in the
+first empty plot (adding one to the main window when none is empty), plots the
+inspected field itself in a new plot, and adds a marker and annotation at each
+gap above the threshold. When no gap exceeds it, the script still publishes
+the series and adds an annotation saying so. Each run first removes what the
+previous run left behind, so it can be rerun with other arguments, and
+disconnects without cleanup so the results stay on screen.
+
+A snapshot field can be traced directly: DéLOG plots the data it already
+holds, so nothing is uploaded, and the trace stays after the snapshot closes:
+
+```python
+with client.snapshot() as snapshot:
+    roll = snapshot.topic("vehicle_attitude", source="flight").field("roll")
+    client.workspace.add_plot().traces.add(roll)
+```
 
 ```sh
 python scripts/external/flight_diagnosis.py \
     --source flight --topic vehicle_attitude --field roll --gap-ms 100
 python scripts/external/flight_diagnosis.py \
-    --topic vehicle_attitude --field roll --replace
+    --topic vehicle_attitude --field pitch
 ```
 
 ## Errors

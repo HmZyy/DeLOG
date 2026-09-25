@@ -102,7 +102,9 @@ def test_flight_diagnosis_publishes_gaps_marks_them_and_leaves_results_visible(
         call["request"] for call in control_server.recorded_calls()["calls"] if not call["query"]
     ]
     assert mutations == [
-        "workspace.open_window",
+        "generation.remove_owned",
+        "workspace.add_plot",
+        "guarded.traces.add_returning",
         "workspace.add_plot",
         "guarded.traces.add_returning",
         "markers.append_returning",
@@ -113,12 +115,17 @@ def test_flight_diagnosis_publishes_gaps_marks_them_and_leaves_results_visible(
 
     client = DeLOG.connect(control_server.instance_id, name="flight-diagnosis")
     state = client.state()
-    [window] = [window for window in state.windows if window.title == "Flight diagnosis"]
-    assert window.owner == rust_fixture.OWNER
+    assert state.windows == ()
+    assert len(state.plots) == 2
+    assert all(plot.window is None for plot in state.plots)
+    assert all(plot.owner == rust_fixture.OWNER for plot in state.plots)
     paths = [trace.field.path for trace in state.traces if isinstance(trace.field, FieldPath)]
-    assert paths == ["flight-diagnosis/diagnostic_sample_gaps/gap_ms"]
-    assert [trace.field.name for trace in state.traces] == ["gap_ms"]
-    assert len(state.traces) == 1
+    assert paths == [
+        "flight-diagnosis/diagnostic_sample_gaps/gap_ms",
+        "flight/vehicle_attitude/roll",
+    ]
+    assert [trace.field.name for trace in state.traces] == ["gap_ms", "roll"]
+    assert len({trace.plot.handle for trace in state.traces}) == 2
     assert len(state.annotations) == 2
     assert [marker.label for marker in state.markers] == ["gap 1.0 ms", "gap 1.0 ms"]
     with client.snapshot() as snapshot:
@@ -129,7 +136,6 @@ def test_flight_diagnosis_publishes_gaps_marks_them_and_leaves_results_visible(
     rerun = _run(
         "flight_diagnosis.py",
         *args,
-        "--replace",
         discovery=control_server.discovery_dir,
         cwd=tmp_path,
     )
@@ -137,7 +143,10 @@ def test_flight_diagnosis_publishes_gaps_marks_them_and_leaves_results_visible(
     assert "no gap above 100.0 ms" in rerun.stdout
     client = DeLOG.connect(control_server.instance_id, name="flight-diagnosis")
     state = client.state()
-    assert any(annotation.label == "no gap above 100.0 ms" for annotation in state.annotations)
+    assert [annotation.label for annotation in state.annotations] == ["no gap above 100.0 ms"]
+    assert state.markers == ()
+    assert len(state.plots) == 2
+    assert len(state.traces) == 2
     with client.snapshot() as snapshot:
         assert [
             topic.name

@@ -31,6 +31,7 @@ def sample_gaps(
 
 
 def diagnose(client: Client, args: argparse.Namespace) -> str:
+    client.remove_owned()
     times, gaps = sample_gaps(client, args.source, args.topic, args.field)
     table = pa.table(
         {
@@ -45,10 +46,16 @@ def diagnose(client: Client, args: argparse.Namespace) -> str:
         descriptions={
             "gap_ms": f"time since the previous {args.topic}.{args.field} sample"
         },
-        replace=args.replace,
     )
-    plot = client.windows.open("Flight diagnosis").workspace.add_plot()
+    # plot = client.windows.open("Flight diagnosis").workspace.add_plot()
+    state = client.state()
+    used = {item.plot.handle for item in state.traces + state.annotations}
+    empty = [candidate for candidate in state.plots if candidate.handle not in used]
+    plot = empty[0] if empty else client.workspace.add_plot()
     plot.traces.add(derived.field("gap_ms"))
+    with client.snapshot() as snapshot:
+        source_field = snapshot.topic(args.topic, source=args.source).field(args.field)
+        client.workspace.add_plot().traces.add(source_field)
 
     over = [(t, gap) for t, gap in zip(times, gaps, strict=True) if gap > args.gap_ms]
     for time_ns, gap in over[:MAX_MARKS]:
@@ -82,9 +89,6 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=100.0,
         help="threshold in milliseconds (default 100.0)",
-    )
-    parser.add_argument(
-        "--replace", action="store_true", help=f"replace an earlier {TOPIC} publication"
     )
     args = parser.parse_args(argv)
     instance = select_instance(args.instance)
