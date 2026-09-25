@@ -1212,7 +1212,7 @@ fn external_client_named_like_a_script_owner_cannot_modify_that_scripts_resource
     let marker = fixture.add_owned_marker("flight-diagnosis");
     fixture.add_trace(Some(owner("flight-diagnosis", 1)));
     let external = ControlPrincipal {
-        owner: owner(&String::from("external/flight-diagnosis"), 1),
+        owner: owner(&delog_remote::external_owner_name("flight-diagnosis"), 1),
         access: AccessMode::Safe,
     };
 
@@ -1246,7 +1246,7 @@ fn external_client_named_like_a_script_owner_cannot_modify_that_scripts_resource
 
 fn external(name: &str, access: AccessMode) -> ControlPrincipal {
     ControlPrincipal {
-        owner: owner(&format!("external/{name}"), 1),
+        owner: owner(&delog_remote::external_owner_name(name), 1),
         access,
     }
 }
@@ -1276,7 +1276,7 @@ fn remove_owned_reports_removed_ui_resources_and_ignores_matching_labels() {
     let mut fixture = PolicyFixture::new();
     let client = external("flight-diagnosis", AccessMode::Safe);
     fixture.apply_trusted(ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
-        title: Some(String::from("external/flight-diagnosis")),
+        title: Some(delog_remote::external_owner_name("flight-diagnosis")),
         owner: None,
     }));
     apply_as(
@@ -1300,7 +1300,7 @@ fn remove_owned_reports_removed_ui_resources_and_ignores_matching_labels() {
         }),
     )
     .unwrap();
-    fixture.add_owned_marker(&String::from("external/flight-diagnosis"));
+    fixture.add_owned_marker(&delog_remote::external_owner_name("flight-diagnosis"));
     fixture.add_owned_marker("flight-diagnosis");
 
     let removed = apply_as(&mut fixture, &client, remove_owned_request())
@@ -1325,7 +1325,7 @@ fn remove_owned_reports_removed_ui_resources_and_ignores_matching_labels() {
 #[test]
 fn a_reconnecting_client_reclaims_ui_restored_under_its_persisted_owner_name() {
     let mut fixture = PolicyFixture::new();
-    let persisted = owner(&String::from("external/flight-diagnosis"), 1);
+    let persisted = owner(&delog_remote::external_owner_name("flight-diagnosis"), 1);
     let tile = fixture
         .apply_trusted(ControlRequest::Workspace(WorkspaceRequest::Split {
             window: 0,

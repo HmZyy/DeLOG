@@ -51,6 +51,7 @@ pub enum CommandId {
     ToggleFieldStats,
     ToggleAnnotationToolbar,
     OpenSettings,
+    OpenExternalApi,
     Exit,
     TogglePlayback,
     JumpStart,
@@ -322,6 +323,7 @@ impl CommandId {
         Self::ToggleFieldStats,
         Self::ToggleAnnotationToolbar,
         Self::OpenSettings,
+        Self::OpenExternalApi,
         Self::Exit,
         Self::TogglePlayback,
         Self::JumpStart,
@@ -357,7 +359,9 @@ impl CommandId {
             | AddMarker => ClassicMenuOwner::Analyze,
             OpenScriptEditor | OpenScriptVariables | OpenParserEditor | RunScript | RunPalette
             | SaveLayout | LoadLayout | ManageLayouts | ManageSequences | ClearLayout
-            | ImportLayout | ExportLayout | OpenSettings => ClassicMenuOwner::Tools,
+            | ImportLayout | ExportLayout | OpenSettings | OpenExternalApi => {
+                ClassicMenuOwner::Tools
+            }
         }
     }
 
