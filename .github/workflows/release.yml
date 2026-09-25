@@ -192,9 +192,42 @@ jobs:
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
+  python-client:
+    name: build python-client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Sync the locked Python environment
+        run: uv sync --locked --project python/delog-client --extra test
+
+      - name: Build wheel and sdist
+        run: uv build --project python/delog-client
+
+      - name: Test the built wheel in a clean environment
+        env:
+          DELOG_CLIENT_DIST: python/delog-client/dist
+        run: uv run --locked --project python/delog-client --extra test pytest python/delog-client/tests/test_installed_wheel.py -q
+
+      - name: Upload Python artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-client
+          path: |
+            python/delog-client/dist/*.whl
+            python/delog-client/dist/*.tar.gz
+          if-no-files-found: error
+
   release:
     name: publish release
-    needs: [build, build-bundled]
+    needs: [build, build-bundled, python-client]
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
