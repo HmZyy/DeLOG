@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::derived::DerivedProvenance;
 use crate::time::{TimestampUs, effective_time_us};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,6 +42,7 @@ pub struct SourceEntry {
     pub kind: SourceKind,
     pub offset_us: TimestampUs,
     pub meta: SourceMetadata,
+    pub derived_provenance: Option<DerivedProvenance>,
     pub removed: bool,
 }
 
@@ -174,8 +176,19 @@ impl IdentityRegistry {
             kind,
             offset_us: 0,
             meta: SourceMetadata::default(),
+            derived_provenance: None,
             removed: false,
         });
+        id
+    }
+
+    pub fn add_derived_source(
+        &mut self,
+        preferred_label: impl Into<String>,
+        provenance: DerivedProvenance,
+    ) -> SourceId {
+        let id = self.add_source_with_kind(preferred_label, SourceKind::Derived);
+        self.sources[id.index()].derived_provenance = Some(provenance);
         id
     }
 

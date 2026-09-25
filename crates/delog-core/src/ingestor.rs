@@ -13,6 +13,7 @@ use arrow::array::{Array, ArrayRef, Int64Array};
 use arrow::compute::{concat, sort_to_indices, take};
 
 use crate::chunk::Chunk;
+use crate::derived::{DerivedCommit, DerivedCommitError, DerivedCommitReceipt};
 use crate::diagnostics::Diag;
 use crate::identity::{IdentityRegistry, SourceId, TopicId};
 use crate::ingest::{
@@ -162,6 +163,12 @@ impl<O: IngestObserver> Ingestor<O> {
                 }
             }
             IngestMsg::RemoveSource { source } => self.remove_source(source),
+            IngestMsg::CommitDerived { commit, reply } => {
+                let _ = reply.send(self.commit_derived(commit));
+            }
+            IngestMsg::RemoveSourceWait { source, reply } => {
+                let _ = reply.send(self.remove_source_wait(source));
+            }
             IngestMsg::RelabelSource { source, label } => {
                 if self.identity.relabel_source(source, label).is_some() {
                     self.publish();
@@ -438,6 +445,145 @@ impl<O: IngestObserver> Ingestor<O> {
         self.observer.on_remove(source);
     }
 
+    fn commit_derived(
+        &mut self,
+        commit: DerivedCommit,
+    ) -> Result<DerivedCommitReceipt, DerivedCommitError> {
+        commit.validate()?;
+
+        let mut identity = self.identity.clone();
+        let mut stores = self.stores.clone();
+        let mut removed_topics = Vec::new();
+
+        if let Some(previous) = commit.previous {
+            let previous_entry = identity
+                .live_source(previous)
+                .ok_or(DerivedCommitError::PreviousSourceNotLive(previous))?;
+            let Some(previous_provenance) = previous_entry.derived_provenance.as_ref() else {
+                return Err(DerivedCommitError::PreviousSourceNotDerived(previous));
+            };
+            if previous_entry.kind != SourceKind::Derived {
+                return Err(DerivedCommitError::PreviousSourceNotDerived(previous));
+            }
+            if previous_entry.label != commit.key
+                || previous_provenance.owner != commit.provenance.owner
+                || previous_provenance.logical_topic != commit.provenance.logical_topic
+            {
+                return Err(DerivedCommitError::PreviousSourceMismatch(previous));
+            }
+
+            let removed = identity
+                .remove_source(previous)
+                .expect("validated live source remains removable in candidate registry");
+            removed_topics = removed.topics;
+            for topic in &removed_topics {
+                stores.remove(topic);
+            }
+        } else if identity
+            .sources()
+            .iter()
+            .any(|source| !source.removed && source.label == commit.key)
+        {
+            return Err(DerivedCommitError::SourceKeyInUse(commit.key));
+        }
+
+        let source = identity.add_derived_source(&commit.key, commit.provenance);
+        let mut topics = HashMap::with_capacity(commit.source.topics().len());
+        let mut topic_max = Vec::with_capacity(commit.source.topics().len());
+        for store in commit.source.topics() {
+            let topic = identity
+                .add_topic(source, store.schema.name())
+                .expect("new derived source is live");
+            for field in store.schema.fields() {
+                identity
+                    .add_field(topic, &field.name)
+                    .expect("new derived topic is live");
+            }
+            topics.insert(store.schema.name().to_owned(), topic);
+            if let Some(range) = store.time_range() {
+                topic_max.push((topic, range.max_us));
+            }
+            stores.insert(topic, Arc::clone(store));
+        }
+
+        let snapshot = StoreSnapshot::from_registry(
+            &identity,
+            stores.iter().map(|(&id, store)| (id, Arc::clone(store))),
+            0,
+        )
+        .map_err(|error| DerivedCommitError::SnapshotBuild(error.to_string()))?;
+        let published = self
+            .store
+            .publish(snapshot)
+            .map_err(|error| DerivedCommitError::StorePublish(error.to_string()))?;
+
+        if let Some(previous) = commit.previous {
+            self.sources.remove(&previous);
+            for topic in &removed_topics {
+                self.topic_max_ts.remove(topic);
+            }
+        }
+        self.identity = identity;
+        self.stores = stores;
+        self.sources.insert(
+            source,
+            SourceState {
+                kind: SourceKind::Derived,
+                seal_rows: FILE_CHUNK_ROWS,
+                topics,
+                pending: HashMap::new(),
+            },
+        );
+        self.topic_max_ts.extend(topic_max);
+        if let Some(previous) = commit.previous {
+            self.observer.on_remove(previous);
+        }
+
+        Ok(DerivedCommitReceipt {
+            source,
+            epoch: published.epoch,
+        })
+    }
+
+    fn remove_source_wait(&mut self, source: SourceId) -> Result<u64, DerivedCommitError> {
+        let source_entry = self
+            .identity
+            .live_source(source)
+            .ok_or(DerivedCommitError::SourceNotLive(source))?;
+        if source_entry.kind != SourceKind::Derived || source_entry.derived_provenance.is_none() {
+            return Err(DerivedCommitError::SourceNotDerived(source));
+        }
+
+        let mut identity = self.identity.clone();
+        let removed = identity
+            .remove_source(source)
+            .expect("validated live source remains removable in candidate registry");
+        let mut stores = self.stores.clone();
+        for topic in &removed.topics {
+            stores.remove(topic);
+        }
+
+        let snapshot = StoreSnapshot::from_registry(
+            &identity,
+            stores.iter().map(|(&id, store)| (id, Arc::clone(store))),
+            0,
+        )
+        .map_err(|error| DerivedCommitError::SnapshotBuild(error.to_string()))?;
+        let published = self
+            .store
+            .publish(snapshot)
+            .map_err(|error| DerivedCommitError::StorePublish(error.to_string()))?;
+
+        self.identity = identity;
+        self.stores = stores;
+        self.sources.remove(&source);
+        for topic in &removed.topics {
+            self.topic_max_ts.remove(topic);
+        }
+        self.observer.on_remove(source);
+        Ok(published.epoch)
+    }
+
     fn flush_source(&mut self, source: SourceId) {
         let topics: Vec<TopicId> = self
             .sources
@@ -556,9 +702,14 @@ mod tests {
     use arrow::datatypes::DataType;
 
     use super::*;
+    use crate::chunk::Chunk;
+    use crate::derived::{
+        DerivedCommit, DerivedCommitError, DerivedProvenance, PreparedDerivedSource,
+    };
     use crate::identity::{AutoMarker, SourceMetadata, SourceParam};
     use crate::ingest::{IngestSink, ingest_channel};
     use crate::schema::FieldSchema;
+    use crate::store::TopicStore;
     use crate::time::TimeRange;
 
     fn schema(name: &str) -> Arc<TopicSchema> {
@@ -622,6 +773,361 @@ mod tests {
 
     fn open(ing: &mut Ingestor<NullObserver>, key: &str, kind: SourceKind) -> SourceId {
         open_with(ing, key, kind)
+    }
+
+    fn prepared_derived_topic(name: &str, values: &[f64]) -> Arc<TopicStore> {
+        let schema = schema(name);
+        let timestamps = Int64Array::from(
+            (0..values.len())
+                .map(|index| i64::try_from(index).unwrap() + 1)
+                .collect::<Vec<_>>(),
+        );
+        let columns: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(values.to_vec()))];
+        let chunk = Arc::new(Chunk::try_new(timestamps, columns, &schema).unwrap());
+        Arc::new(TopicStore::from_chunks(schema, [chunk]).unwrap())
+    }
+
+    fn derived_commit(
+        key: &str,
+        owner: &str,
+        logical_topic: &str,
+        generation: u64,
+        previous: Option<SourceId>,
+        values: &[f64],
+    ) -> DerivedCommit {
+        DerivedCommit {
+            key: key.to_owned(),
+            provenance: DerivedProvenance {
+                owner: owner.to_owned(),
+                logical_topic: logical_topic.to_owned(),
+                generation,
+                commit_nonce: [generation as u8; 16],
+            },
+            previous,
+            source: PreparedDerivedSource::try_new([prepared_derived_topic(logical_topic, values)])
+                .unwrap(),
+        }
+    }
+
+    fn process_derived_commit<O: IngestObserver>(
+        ing: &mut Ingestor<O>,
+        commit: DerivedCommit,
+    ) -> Result<crate::derived::DerivedCommitReceipt, DerivedCommitError> {
+        let (reply, receipt) = std::sync::mpsc::sync_channel(1);
+        ing.process(IngestMsg::CommitDerived { commit, reply });
+        receipt.recv().unwrap()
+    }
+
+    fn process_derived_remove<O: IngestObserver>(
+        ing: &mut Ingestor<O>,
+        source: SourceId,
+    ) -> Result<u64, DerivedCommitError> {
+        let (reply, receipt) = std::sync::mpsc::sync_channel(1);
+        ing.process(IngestMsg::RemoveSourceWait { source, reply });
+        receipt.recv().unwrap()
+    }
+
+    fn first_derived_value(snapshot: &StoreSnapshot, source: SourceId) -> f64 {
+        let topic = snapshot
+            .source(source)
+            .unwrap()
+            .topics
+            .iter()
+            .copied()
+            .find(|topic| snapshot.is_topic_live(*topic))
+            .unwrap();
+        snapshot.topic_store(topic).unwrap().chunks[0].cols[0]
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[test]
+    fn derived_replacement_publishes_once_and_old_snapshots_keep_old_data() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let first = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                1,
+                None,
+                &[1.0],
+            ),
+        )
+        .unwrap();
+        let pinned = store.load();
+        let epoch_before = pinned.epoch;
+
+        let second = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                2,
+                Some(first.source),
+                &[2.0],
+            ),
+        )
+        .unwrap();
+        let current = store.load();
+
+        assert_eq!(second.epoch, epoch_before + 1);
+        assert_eq!(first_derived_value(&pinned, first.source), 1.0);
+        assert_eq!(first_derived_value(&current, second.source), 2.0);
+        assert!(!current.is_source_live(first.source));
+        assert_eq!(
+            current
+                .source(second.source)
+                .unwrap()
+                .entry
+                .derived_provenance
+                .as_ref()
+                .unwrap()
+                .generation,
+            2
+        );
+    }
+
+    #[test]
+    fn derived_prepare_rejects_duplicate_topic_names_before_mutation() {
+        let error = PreparedDerivedSource::try_new([
+            prepared_derived_topic("error", &[1.0]),
+            prepared_derived_topic("error", &[2.0]),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            DerivedCommitError::DuplicateTopicName("error".to_owned())
+        );
+    }
+
+    #[test]
+    fn derived_prepare_requires_at_least_one_non_empty_topic() {
+        assert_eq!(
+            PreparedDerivedSource::try_new([]).unwrap_err(),
+            DerivedCommitError::EmptySource
+        );
+        assert_eq!(
+            PreparedDerivedSource::try_new([Arc::new(TopicStore::new(schema("error")))])
+                .unwrap_err(),
+            DerivedCommitError::EmptySource
+        );
+    }
+
+    #[test]
+    fn derived_commit_validates_key_owner_topic_and_generation_before_mutation() {
+        let cases = [
+            (
+                derived_commit(" ", "diagnosis", "error", 1, None, &[1.0]),
+                DerivedCommitError::EmptyKey,
+            ),
+            (
+                derived_commit("external:diagnosis/error", " ", "error", 1, None, &[1.0]),
+                DerivedCommitError::EmptyOwner,
+            ),
+            (
+                derived_commit(
+                    "external:diagnosis/error",
+                    "diagnosis",
+                    " ",
+                    1,
+                    None,
+                    &[1.0],
+                ),
+                DerivedCommitError::EmptyLogicalTopic,
+            ),
+            (
+                derived_commit(
+                    "external:diagnosis/error",
+                    "diagnosis",
+                    "error",
+                    0,
+                    None,
+                    &[1.0],
+                ),
+                DerivedCommitError::ZeroGeneration,
+            ),
+        ];
+
+        for (commit, expected) in cases {
+            let mut ing = Ingestor::new(NullObserver);
+            let epoch = ing.store().current_epoch();
+            assert_eq!(process_derived_commit(&mut ing, commit), Err(expected));
+            assert_eq!(ing.store().current_epoch(), epoch);
+            assert!(ing.identity.sources().is_empty());
+        }
+    }
+
+    #[test]
+    fn derived_sender_reports_disconnect_before_returning_a_receipt() {
+        let (sender, receiver) = ingest_channel();
+        drop(receiver);
+
+        assert_eq!(
+            sender
+                .commit_derived(derived_commit(
+                    "external:diagnosis/error",
+                    "diagnosis",
+                    "error",
+                    1,
+                    None,
+                    &[1.0],
+                ))
+                .unwrap_err(),
+            crate::ingest::IngestDisconnected
+        );
+        assert_eq!(
+            sender.remove_source_wait(SourceId(7)).unwrap_err(),
+            crate::ingest::IngestDisconnected
+        );
+    }
+
+    #[test]
+    fn derived_replace_rejects_stale_and_non_derived_previous_sources() {
+        let mut ing = Ingestor::new(NullObserver);
+        let first = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                1,
+                None,
+                &[1.0],
+            ),
+        )
+        .unwrap();
+        process_derived_remove(&mut ing, first.source).unwrap();
+
+        let stale = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                2,
+                Some(first.source),
+                &[2.0],
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            stale,
+            DerivedCommitError::PreviousSourceNotLive(first.source)
+        );
+
+        let file = open(&mut ing, "flight", SourceKind::File);
+        let not_derived = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                2,
+                Some(file),
+                &[2.0],
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            not_derived,
+            DerivedCommitError::PreviousSourceNotDerived(file)
+        );
+    }
+
+    #[test]
+    fn derived_snapshot_build_failure_preserves_the_old_generation() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let first = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                1,
+                None,
+                &[1.0],
+            ),
+        )
+        .unwrap();
+        let before = store.load();
+        ing.stores
+            .insert(TopicId(u32::MAX), prepared_derived_topic("invalid", &[9.0]));
+
+        let error = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                2,
+                Some(first.source),
+                &[2.0],
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, DerivedCommitError::SnapshotBuild(_)));
+        let after = store.load();
+        assert_eq!(after.epoch, before.epoch);
+        assert!(after.is_source_live(first.source));
+        assert_eq!(first_derived_value(&after, first.source), 1.0);
+        assert!(ing.identity.live_source(first.source).is_some());
+    }
+
+    #[test]
+    fn derived_remove_publishes_once_and_acknowledges_the_new_epoch() {
+        let mut recorder = Recorder::default();
+        let mut ing = Ingestor::new(&mut recorder);
+        let store = ing.store();
+        let first = process_derived_commit(
+            &mut ing,
+            derived_commit(
+                "external:diagnosis/error",
+                "diagnosis",
+                "error",
+                1,
+                None,
+                &[1.0],
+            ),
+        )
+        .unwrap();
+        let before = store.load().epoch;
+
+        let removed_epoch = process_derived_remove(&mut ing, first.source).unwrap();
+
+        assert_eq!(removed_epoch, before + 1);
+        assert_eq!(store.load().epoch, before + 1);
+        assert!(!store.load().is_source_live(first.source));
+        assert_eq!(recorder.removes, vec![first.source]);
+    }
+
+    #[test]
+    fn derived_same_logical_topic_is_isolated_between_owners() {
+        let mut ing = Ingestor::new(NullObserver);
+        let store = ing.store();
+        let a = process_derived_commit(
+            &mut ing,
+            derived_commit("external:alpha/error", "alpha", "error", 1, None, &[1.0]),
+        )
+        .unwrap();
+        let b = process_derived_commit(
+            &mut ing,
+            derived_commit("external:bravo/error", "bravo", "error", 1, None, &[2.0]),
+        )
+        .unwrap();
+
+        let current = store.load();
+        assert_ne!(a.source, b.source);
+        assert_eq!(first_derived_value(&current, a.source), 1.0);
+        assert_eq!(first_derived_value(&current, b.source), 2.0);
     }
 
     #[test]
