@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use delog_api::control::{
-    ControlRequest, ControlResponse, GenerationRequest, request_is_batchable,
+    ControlPrincipal, ControlRequest, ControlResponse, GenerationRequest, request_is_batchable,
 };
+use delog_api::{Error, Result};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
 
@@ -13,19 +14,45 @@ use crate::shell::workspace::Workspace;
 pub(super) fn apply_batch(
     control: &mut AppControl<'_>,
     requests: Vec<ControlRequest>,
-) -> Result<ControlResponse, String> {
-    let terminal_commit = requests.last().and_then(|request| match request {
-        ControlRequest::Generation(GenerationRequest::Commit { owner, generation }) => {
-            Some((owner.clone(), *generation))
-        }
-        _ => None,
-    });
+) -> Result<ControlResponse> {
+    apply_batch_inner(control, requests, None)
+}
+
+pub(super) fn apply_authorized_batch(
+    control: &mut AppControl<'_>,
+    principal: &ControlPrincipal,
+    requests: Vec<ControlRequest>,
+) -> Result<ControlResponse> {
+    apply_batch_inner(control, requests, Some(principal))
+}
+
+fn apply_batch_inner(
+    control: &mut AppControl<'_>,
+    requests: Vec<ControlRequest>,
+    principal: Option<&ControlPrincipal>,
+) -> Result<ControlResponse> {
+    let terminal_commit = principal
+        .is_none()
+        .then(|| {
+            requests.last().and_then(|request| match request {
+                ControlRequest::Generation(GenerationRequest::Commit { owner, generation }) => {
+                    Some((owner.clone(), *generation))
+                }
+                _ => None,
+            })
+        })
+        .flatten();
     for (index, request) in requests.iter().enumerate() {
         if !request_is_batchable(request) {
             rollback_terminal_commit(control, terminal_commit.as_ref());
-            return Err(format!(
+            return Err(Error::invalid_input(format!(
                 "batch request {index} is not an atomic mutation supported by delog.batch()"
-            ));
+            )));
+        }
+        if principal.is_none() {
+            request
+                .validate()
+                .map_err(|error| error.with_context(format!("batch request {index}")))?;
         }
     }
 
@@ -56,13 +83,22 @@ pub(super) fn apply_batch(
     };
 
     for (index, request) in requests.into_iter().enumerate() {
+        let request = if let Some(principal) = principal {
+            crate::shell::app::control_policy::authorize_and_stamp(&mut shadow, principal, request)
+                .map_err(|error| error.with_context(format!("batch request {index}")))?
+        } else {
+            request
+        };
+        if principal.is_some() {
+            request
+                .validate()
+                .map_err(|error| error.with_context(format!("batch request {index}")))?;
+        }
         if let Err(error) = apply_one(&mut shadow, request) {
-            drop(shadow);
             rollback_terminal_commit(control, terminal_commit.as_ref());
-            return Err(format!("batch request {index} failed: {error}"));
+            return Err(error.with_context(format!("batch request {index}")));
         }
     }
-    drop(shadow);
 
     *control.markers = markers;
     *control.workspace = workspace;
@@ -87,6 +123,17 @@ fn rollback_terminal_commit(control: &mut AppControl<'_>, commit: Option<&(Strin
                 generation: *generation,
             },
         );
+    }
+}
+
+pub(super) fn rollback_terminal_commit_for_batch(
+    control: &mut AppControl<'_>,
+    requests: &[ControlRequest],
+) {
+    if let Some(ControlRequest::Generation(GenerationRequest::Commit { owner, generation })) =
+        requests.last()
+    {
+        rollback_terminal_commit(control, Some(&(owner.clone(), *generation)));
     }
 }
 

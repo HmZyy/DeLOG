@@ -4,11 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "scripting")]
 use delog_api::control::{
     ProfileFieldRef, ProfileNedReference, ProfileOrientation, ProfilePosition, VehicleModel,
     VehicleProfileInfo,
 };
+use delog_api::{Error, Result};
 use delog_core::identity::SourceId;
 use delog_core::snapshot::StoreSnapshot;
 use serde::{Deserialize, Serialize};
@@ -59,20 +59,22 @@ impl VehicleProfileDoc {
         Some(config)
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<()> {
         if self.delog_vehicle_profile != VEHICLE_PROFILE_VERSION {
-            return Err(format!(
+            return Err(Error::invalid_input(format!(
                 "unsupported vehicle profile version {}",
                 self.delog_vehicle_profile
-            ));
+            )));
         }
         if !self.vehicle.scale.is_finite() || self.vehicle.scale <= 0.0 {
-            return Err("vehicle scale must be finite and > 0".to_owned());
+            return Err(Error::invalid_input("vehicle scale must be finite and > 0"));
         }
         match &self.vehicle.position {
             layout::PosLayout::Gps { alt_offset_m, .. } => {
                 if !alt_offset_m.is_finite() {
-                    return Err("vehicle GPS alt_offset_m must be finite".to_owned());
+                    return Err(Error::invalid_input(
+                        "vehicle GPS alt_offset_m must be finite",
+                    ));
                 }
             }
             layout::PosLayout::Ned {
@@ -90,7 +92,7 @@ impl VehicleProfileDoc {
                     || !(-90.0..=90.0).contains(lat_deg)
                     || !(-180.0..=180.0).contains(lon_deg)
                 {
-                    return Err("vehicle NED georeference is invalid".to_owned());
+                    return Err(Error::invalid_input("vehicle NED georeference is invalid"));
                 }
             }
             layout::PosLayout::Ned { .. } => {}
@@ -98,7 +100,6 @@ impl VehicleProfileDoc {
         Ok(())
     }
 
-    #[cfg(feature = "scripting")]
     pub fn to_script_info(&self) -> VehicleProfileInfo {
         VehicleProfileInfo {
             name: self.name.clone(),
@@ -115,7 +116,6 @@ impl VehicleProfileDoc {
     }
 }
 
-#[cfg(feature = "scripting")]
 fn script_field(field: &layout::FieldRef) -> ProfileFieldRef {
     ProfileFieldRef {
         topic: field.topic.clone(),
@@ -123,7 +123,6 @@ fn script_field(field: &layout::FieldRef) -> ProfileFieldRef {
     }
 }
 
-#[cfg(feature = "scripting")]
 fn script_position(position: &layout::PosLayout) -> ProfilePosition {
     match position {
         layout::PosLayout::Ned {
@@ -170,7 +169,6 @@ fn script_position(position: &layout::PosLayout) -> ProfilePosition {
     }
 }
 
-#[cfg(feature = "scripting")]
 fn script_orientation(orientation: &layout::OriLayout) -> ProfileOrientation {
     match orientation {
         layout::OriLayout::Static => ProfileOrientation::Static,
@@ -194,7 +192,6 @@ fn script_orientation(orientation: &layout::OriLayout) -> ProfileOrientation {
     }
 }
 
-#[cfg(feature = "scripting")]
 fn script_model(model: &layout::ModelLayout) -> VehicleModel {
     match model {
         layout::ModelLayout::None => VehicleModel::None,
@@ -208,7 +205,6 @@ fn script_model(model: &layout::ModelLayout) -> VehicleModel {
     }
 }
 
-#[cfg(feature = "scripting")]
 fn script_color(color: [u8; 4]) -> [f32; 4] {
     color.map(|component| component as f32 / 255.0)
 }
@@ -277,14 +273,14 @@ impl VehicleProfileLibrary {
             ));
         }
         doc.validate()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         Ok(doc)
     }
 
     pub fn save(&self, name: &str, doc: &VehicleProfileDoc) -> io::Result<()> {
         let path = self.profile_path(name)?;
         doc.validate()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         fs::create_dir_all(&self.dir)?;
         let json = serde_json::to_string_pretty(doc)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
@@ -466,7 +462,6 @@ mod tests {
         fs::remove_dir_all(tmp).unwrap();
     }
 
-    #[cfg(feature = "scripting")]
     #[test]
     fn profile_doc_converts_to_source_independent_script_payload() {
         let info = sample_doc().to_script_info();

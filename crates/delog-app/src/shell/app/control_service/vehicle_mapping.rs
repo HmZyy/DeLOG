@@ -3,23 +3,20 @@ use delog_api::control::{
     VehicleNedReference as ScriptNedReference, VehicleOrientation as ScriptVehicleOrientation,
     VehiclePosition,
 };
+use delog_api::{Error, Result};
 use delog_core::identity::{FieldId, SourceId};
 use delog_core::snapshot::StoreSnapshot;
 
-pub(super) fn validate_source(
-    snapshot: &StoreSnapshot,
-    id: SourceId,
-    path: &str,
-) -> Result<(), String> {
+pub(super) fn validate_source(snapshot: &StoreSnapshot, id: SourceId, path: &str) -> Result<()> {
     let source = snapshot
         .source(id)
         .filter(|source| !source.entry.removed && source.entry.id == id)
-        .ok_or_else(|| format!("source '{path}' is gone"))?;
+        .ok_or_else(|| Error::stale_handle(format!("source '{path}' is gone")))?;
     if source.entry.label != path {
-        return Err(format!(
+        return Err(Error::stale_handle(format!(
             "source '{path}' no longer matches source {} ('{}')",
             id.0, source.entry.label
-        ));
+        )));
     }
     Ok(())
 }
@@ -28,21 +25,35 @@ fn validate_field(
     snapshot: &StoreSnapshot,
     source: SourceId,
     field: &ResolvedVehicleField,
-) -> Result<FieldId, String> {
+) -> Result<FieldId> {
     let entry = snapshot
         .fields
         .get(field.id.index())
         .filter(|entry| !entry.removed && entry.id == field.id)
-        .ok_or_else(|| format!("field '{}' is gone", field.path))?;
+        .ok_or_else(|| Error::stale_handle(format!("field '{}' is gone", field.path)))?;
     let topic = snapshot
         .topic(entry.topic)
         .filter(|topic| !topic.entry.removed)
-        .ok_or_else(|| format!("field '{}' is gone", field.path))?;
+        .ok_or_else(|| Error::stale_handle(format!("field '{}' is gone", field.path)))?;
     if topic.entry.source != source {
-        return Err(format!(
+        return Err(Error::invalid_input(format!(
             "field '{}' belongs to source {}, not vehicle source {}",
             field.path, topic.entry.source.0, source.0
-        ));
+        )));
+    }
+    let source_entry = snapshot
+        .source(source)
+        .filter(|entry| !entry.entry.removed)
+        .ok_or_else(|| Error::stale_handle(format!("source {} is gone", source.0)))?;
+    let current_path = format!(
+        "{}/{}/{}",
+        source_entry.entry.label, topic.entry.name, entry.name
+    );
+    if field.path != current_path {
+        return Err(Error::stale_handle(format!(
+            "field '{}' no longer matches field {} ('{current_path}')",
+            field.path, field.id.0
+        )));
     }
     Ok(field.id)
 }
@@ -50,20 +61,20 @@ fn validate_field(
 pub(super) fn resolved_field(
     snapshot: &StoreSnapshot,
     field: FieldId,
-) -> Result<ResolvedVehicleField, String> {
+) -> Result<ResolvedVehicleField> {
     let entry = snapshot
         .fields
         .get(field.index())
         .filter(|entry| !entry.removed && entry.id == field)
-        .ok_or_else(|| format!("field {} is gone", field.0))?;
+        .ok_or_else(|| Error::stale_handle(format!("field {} is gone", field.0)))?;
     let topic = snapshot
         .topic(entry.topic)
         .filter(|topic| !topic.entry.removed)
-        .ok_or_else(|| format!("field {} is gone", field.0))?;
+        .ok_or_else(|| Error::stale_handle(format!("field {} is gone", field.0)))?;
     let source = snapshot
         .source(topic.entry.source)
         .filter(|source| !source.entry.removed)
-        .ok_or_else(|| format!("field {} source is gone", field.0))?;
+        .ok_or_else(|| Error::stale_handle(format!("field {} source is gone", field.0)))?;
     Ok(ResolvedVehicleField {
         id: field,
         path: format!("{}/{}/{}", source.entry.label, topic.entry.name, entry.name),
@@ -74,7 +85,7 @@ pub(super) fn app_position(
     snapshot: &StoreSnapshot,
     source: SourceId,
     position: VehiclePosition,
-) -> Result<crate::scene3d::vehicle::PosMapping, String> {
+) -> Result<crate::scene3d::vehicle::PosMapping> {
     use crate::scene3d::vehicle::{GeoRef, NedReference, PosMapping};
 
     match position {
@@ -85,7 +96,7 @@ pub(super) fn app_position(
             reference,
         } => {
             let reference = reference
-                .map(|reference| -> Result<NedReference, String> {
+                .map(|reference| -> Result<NedReference> {
                     match reference {
                         ScriptNedReference::Manual {
                             lat_deg,
@@ -98,7 +109,9 @@ pub(super) fn app_position(
                                 || !(-90.0..=90.0).contains(&lat_deg)
                                 || !(-180.0..=180.0).contains(&lon_deg)
                             {
-                                return Err("vehicle NED georeference is invalid".to_string());
+                                return Err(Error::invalid_input(
+                                    "vehicle NED georeference is invalid",
+                                ));
                             }
                             Ok(NedReference::Manual(GeoRef {
                                 lat_deg,
@@ -130,7 +143,9 @@ pub(super) fn app_position(
             alt_offset_m,
         } => {
             if !alt_offset_m.is_finite() {
-                return Err("vehicle GPS alt_offset_m must be finite".into());
+                return Err(Error::invalid_input(
+                    "vehicle GPS alt_offset_m must be finite",
+                ));
             }
             Ok(PosMapping::Gps {
                 lat: validate_field(snapshot, source, &lat)?,
@@ -148,7 +163,7 @@ pub(super) fn app_orientation(
     snapshot: &StoreSnapshot,
     source: SourceId,
     orientation: ScriptVehicleOrientation,
-) -> Result<crate::scene3d::vehicle::OriMapping, String> {
+) -> Result<crate::scene3d::vehicle::OriMapping> {
     use crate::scene3d::vehicle::OriMapping;
 
     match orientation {
@@ -205,14 +220,14 @@ pub(super) fn script_model(model: &crate::scene3d::vehicle::ModelKind) -> Script
     }
 }
 
-pub(super) fn app_color(color: [f32; 4], name: &str) -> Result<egui::Color32, String> {
+pub(super) fn app_color(color: [f32; 4], name: &str) -> Result<egui::Color32> {
     if color
         .iter()
         .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
     {
-        return Err(format!(
+        return Err(Error::invalid_input(format!(
             "{name} components must be finite and between 0 and 1"
-        ));
+        )));
     }
     Ok(egui::Color32::from_rgba_unmultiplied(
         (color[0] * 255.0).round() as u8,
@@ -232,10 +247,10 @@ pub(super) fn color_to_script(color: egui::Color32) -> [f32; 4] {
     ]
 }
 
-pub(super) fn validate_scale(scale: f32) -> Result<(), String> {
+pub(super) fn validate_scale(scale: f32) -> Result<()> {
     if scale.is_finite() && scale > 0.0 {
         Ok(())
     } else {
-        Err("vehicle scale must be finite and > 0".into())
+        Err(Error::invalid_input("vehicle scale must be finite and > 0"))
     }
 }

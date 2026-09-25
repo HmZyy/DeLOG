@@ -60,6 +60,7 @@ fn sanitize_layout_name_blocks_paths() {
 #[test]
 fn plot_field_ref_has_no_source_in_json() {
     let trace = TraceLayout {
+        owner: None,
         field: FieldRef {
             topic: "ATT".into(),
             field: "Roll".into(),
@@ -395,6 +396,7 @@ fn empty_doc(name: &str) -> LayoutDoc {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -409,6 +411,7 @@ fn empty_doc(name: &str) -> LayoutDoc {
 fn doc_with_annotation() -> LayoutDoc {
     let mut doc = empty_doc("annotated");
     doc.workspace.root = LayoutNode::Plot {
+        owner: None,
         traces: Vec::new(),
         show_legend: true,
         show_tooltip: true,
@@ -561,6 +564,7 @@ fn extended_windows_round_trip_through_the_document() {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -568,10 +572,12 @@ fn extended_windows_round_trip_through_the_document() {
             },
         },
         windows: vec![WindowLayout {
+            owner: None,
             id: None,
             title: "DeLOG · Window 1".to_owned(),
             size: [1600.0, 900.0],
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,

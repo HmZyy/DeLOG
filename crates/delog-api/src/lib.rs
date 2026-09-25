@@ -8,4 +8,4 @@ pub mod operations;
 pub mod params;
 pub mod timestamps;
 
-pub use error::{Error, ErrorKind, Result};
+pub use error::{Error, ErrorKind, MutationCompletion, Result};

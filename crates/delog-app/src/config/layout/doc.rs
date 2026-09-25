@@ -56,6 +56,8 @@ pub struct WorkspaceLayout {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WindowLayout {
     #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
     pub id: Option<u64>,
     pub title: String,
     pub size: [f32; 2],
@@ -66,6 +68,8 @@ pub struct WindowLayout {
 #[serde(rename_all = "snake_case")]
 pub enum LayoutNode {
     Plot {
+        #[serde(default)]
+        owner: Option<String>,
         traces: Vec<TraceLayout>,
         #[serde(default = "default_true")]
         show_legend: bool,
@@ -92,6 +96,8 @@ pub enum SplitLayout {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TraceLayout {
+    #[serde(default)]
+    pub owner: Option<String>,
     pub field: FieldRef,
     pub color: [f32; 4],
     pub width_px: f32,

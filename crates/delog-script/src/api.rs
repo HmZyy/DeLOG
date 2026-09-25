@@ -616,7 +616,7 @@ impl Delog {
 
     #[getter]
     fn windows(&self) -> crate::control::workspace::WindowsPy {
-        crate::control::workspace::WindowsPy
+        crate::control::workspace::WindowsPy::new(self.plot_context())
     }
 
     #[getter]

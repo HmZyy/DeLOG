@@ -1,5 +1,3 @@
-#[cfg(feature = "scripting")]
-pub mod control_host;
 #[cfg(feature = "bundled-python")]
 pub mod py_runtime;
 #[cfg(feature = "scripting")]

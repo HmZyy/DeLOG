@@ -3,11 +3,12 @@ use std::path::Path;
 use delog_api::control::{
     ControlRequest, ControlResponse, LayoutFieldIssue, LayoutRequest, LoadReport,
 };
+use delog_api::{Error, Result};
 
 use super::{AppControl, trace_counts, unpin_removed_traces};
 use crate::config::layout::doc::{
-    LayoutDoc, decode_doc, delete_named, doc_json, duplicate_named, export_doc, import_doc,
-    load_named_doc, rename_named, save_named, try_list_layouts,
+    LayoutDoc, LayoutError, decode_doc, delete_named, doc_json, duplicate_named, export_doc,
+    import_doc, load_named_doc, rename_named, save_named, try_list_layouts,
 };
 use crate::shell::layout_apply::{CurrentLayout, LayoutApply, LoadOutcome, current_doc, load_doc};
 
@@ -57,45 +58,50 @@ impl LayoutControlEffects {
 pub(super) fn apply_layout_request(
     control: &mut AppControl<'_>,
     request: LayoutRequest,
-) -> Result<ControlResponse, String> {
+) -> Result<ControlResponse> {
     match request {
         LayoutRequest::List => Ok(ControlResponse::Names(
-            try_list_layouts().map_err(|error| error.to_string())?,
+            try_list_layouts().map_err(layout_error)?,
         )),
         LayoutRequest::Save { name } => {
             let name = validate_name(&name)?;
             let doc = current(control, name.clone());
-            save_named(&name, &doc).map_err(|error| error.to_string())?;
+            save_named(&name, &doc).map_err(layout_error)?;
             Ok(ControlResponse::Unit)
         }
         LayoutRequest::Load { name } => {
             let name = validate_name(&name)?;
-            let doc = load_named_doc(&name).map_err(|error| error.to_string())?;
+            require_named_layout(&name)?;
+            let doc = load_named_doc(&name).map_err(layout_error)?;
             apply_doc(control, doc)
         }
         LayoutRequest::Delete { name } => {
-            delete_named(&validate_name(&name)?).map_err(|error| error.to_string())?;
+            let name = validate_name(&name)?;
+            require_named_layout(&name)?;
+            delete_named(&name).map_err(layout_error)?;
             Ok(ControlResponse::Unit)
         }
         LayoutRequest::Rename { from, to } => {
-            rename_named(&validate_name(&from)?, &validate_name(&to)?)
-                .map_err(|error| error.to_string())?;
+            let from = validate_name(&from)?;
+            require_named_layout(&from)?;
+            rename_named(&from, &validate_name(&to)?).map_err(layout_error)?;
             Ok(ControlResponse::Unit)
         }
         LayoutRequest::Duplicate { from, to } => {
-            duplicate_named(&validate_name(&from)?, &validate_name(&to)?)
-                .map_err(|error| error.to_string())?;
+            let from = validate_name(&from)?;
+            require_named_layout(&from)?;
+            duplicate_named(&from, &validate_name(&to)?).map_err(layout_error)?;
             Ok(ControlResponse::Unit)
         }
         LayoutRequest::ImportFile { path } => {
-            let doc =
-                import_doc(Path::new(validate_path(&path)?)).map_err(|error| error.to_string())?;
+            let doc = import_doc(Path::new(validate_path(&path)?)).map_err(layout_error)?;
             apply_doc(control, doc)
         }
         LayoutRequest::ExportFile { name, path } => {
-            let doc = load_named_doc(&validate_name(&name)?).map_err(|error| error.to_string())?;
-            export_doc(Path::new(validate_path(&path)?), &doc)
-                .map_err(|error| error.to_string())?;
+            let name = validate_name(&name)?;
+            require_named_layout(&name)?;
+            let doc = load_named_doc(&name).map_err(layout_error)?;
+            export_doc(Path::new(validate_path(&path)?), &doc).map_err(layout_error)?;
             Ok(ControlResponse::Unit)
         }
         LayoutRequest::Clear => {
@@ -105,13 +111,34 @@ pub(super) fn apply_layout_request(
         LayoutRequest::Current => {
             let doc = current(control, "current".into());
             Ok(ControlResponse::Layout(
-                doc_json(&doc).map_err(|error| error.to_string())?,
+                doc_json(&doc).map_err(|error| Error::internal(error.to_string()))?,
             ))
         }
         LayoutRequest::Apply { json } => {
-            let doc = decode_doc(&json).map_err(|error| error.to_string())?;
+            let doc = decode_doc(&json).map_err(layout_error)?;
             apply_doc(control, doc)
         }
+    }
+}
+
+fn layout_error(error: LayoutError) -> Error {
+    match error {
+        LayoutError::Json(_) | LayoutError::UnsupportedVersion(_) | LayoutError::MissingVersion => {
+            Error::invalid_input(error.to_string())
+        }
+        LayoutError::Io(_) | LayoutError::NoStorageDir => Error::execution(error.to_string()),
+    }
+}
+
+fn require_named_layout(name: &str) -> Result<()> {
+    if try_list_layouts()
+        .map_err(layout_error)?
+        .iter()
+        .any(|candidate| candidate == name)
+    {
+        Ok(())
+    } else {
+        Err(Error::not_found(format!("layout '{name}' was not found")))
     }
 }
 
@@ -127,8 +154,8 @@ fn current(control: &AppControl<'_>, name: String) -> LayoutDoc {
     })
 }
 
-fn apply_doc(control: &mut AppControl<'_>, doc: LayoutDoc) -> Result<ControlResponse, String> {
-    let layout = match load_doc(doc, control.snapshot).map_err(|error| error.to_string())? {
+fn apply_doc(control: &mut AppControl<'_>, doc: LayoutDoc) -> Result<ControlResponse> {
+    let layout = match load_doc(doc, control.snapshot).map_err(layout_error)? {
         LoadOutcome::Applied(layout) => layout,
         LoadOutcome::NeedsMapping(pending) => pending.apply_skipping(control.snapshot),
     };
@@ -172,14 +199,20 @@ fn bridge_report(layout: &LayoutApply) -> LoadReport {
     }
 }
 
-fn apply_layout(control: &mut AppControl<'_>, mut layout: LayoutApply) -> Result<(), String> {
+fn apply_layout(control: &mut AppControl<'_>, mut layout: LayoutApply) -> Result<()> {
     let traces_before = trace_counts(control.workspace, control.windows);
     let mut next_vehicle_id = *control.next_vehicle_id;
-    crate::scene3d::vehicle::assign_runtime_ids(&mut layout.vehicles, &mut next_vehicle_id)?;
+    crate::scene3d::vehicle::assign_runtime_ids(&mut layout.vehicles, &mut next_vehicle_id)
+        .map_err(Error::internal)?;
+
+    crate::shell::windows::install_restored_windows(
+        control.windows,
+        control.next_window_id,
+        std::mem::take(&mut layout.windows),
+    )
+    .map_err(Error::internal)?;
 
     *control.workspace = layout.workspace;
-    *control.windows = layout.windows;
-    *control.next_window_id = crate::shell::windows::next_window_id(control.windows);
     control.playback.set_speed(layout.speed as f32);
     control.playback.follow_live = layout.follow_live;
     *control.vehicles = layout.vehicles;
@@ -196,7 +229,6 @@ fn clear(control: &mut AppControl<'_>) {
     let traces_before = trace_counts(control.workspace, control.windows);
     *control.workspace = crate::shell::workspace::Workspace::new();
     control.windows.clear();
-    *control.next_window_id = 1;
     control.playback.set_speed(1.0);
     control.playback.follow_live = false;
     control.markers.clear_preserving_ids();
@@ -207,21 +239,23 @@ fn clear(control: &mut AppControl<'_>) {
     unpin_removed_traces(control.caches, &traces_before, &traces_after);
 }
 
-fn validate_name(name: &str) -> Result<String, String> {
+fn validate_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty()
         || !name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err("layout names may contain only ASCII letters, digits, '-' and '_'".into());
+        return Err(Error::invalid_input(
+            "layout names may contain only ASCII letters, digits, '-' and '_'",
+        ));
     }
     Ok(name.to_owned())
 }
 
-fn validate_path(path: &str) -> Result<&str, String> {
+fn validate_path(path: &str) -> Result<&str> {
     if path.trim().is_empty() {
-        Err("layout path must not be empty".into())
+        Err(Error::invalid_input("layout path must not be empty"))
     } else {
         Ok(path)
     }
