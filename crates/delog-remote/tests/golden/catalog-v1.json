@@ -1,0 +1,40 @@
+{
+  "snapshot_epoch": 7,
+  "sources": [
+    {
+      "handle": "source-v1",
+      "label": "flight",
+      "kind": "file",
+      "offset_ns": 0,
+      "topics": [
+        {
+          "handle": "topic-v1",
+          "name": "vehicle_attitude",
+          "base_name": "vehicle_attitude",
+          "instance": null,
+          "row_count": 2,
+          "time_range_ns": {
+            "start_ns": 1000,
+            "end_ns": 2000
+          },
+          "fields": [
+            {
+              "handle": "field-v1",
+              "name": "roll",
+              "selector": {
+                "source": "flight",
+                "topic": "vehicle_attitude",
+                "instance": null,
+                "field": "roll"
+              },
+              "arrow_type": "float64",
+              "unit": "rad",
+              "description": "Roll angle",
+              "multiplier": 1.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
