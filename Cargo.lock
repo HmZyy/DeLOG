@@ -1096,6 +1096,7 @@ dependencies = [
  "delog-flow",
  "delog-parquet-format",
  "delog-parsers",
+ "delog-remote",
  "delog-render",
  "delog-script",
  "delog-stream",

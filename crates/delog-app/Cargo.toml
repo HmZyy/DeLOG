@@ -40,6 +40,7 @@ delog-parsers = { workspace = true }
 delog-stream = { workspace = true }
 delog-cache = { workspace = true }
 delog-render = { workspace = true }
+delog-remote = { workspace = true }
 delog-script = { workspace = true, optional = true }
 egui_code_editor = { workspace = true, optional = true }
 

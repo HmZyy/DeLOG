@@ -17,6 +17,10 @@ mod sequences;
 mod viewport_actions;
 mod window_render;
 
+#[cfg(test)]
+pub(crate) use control_queue::{AppControlHost, ControlQueue};
+#[cfg(test)]
+pub(crate) use control_service::{AppControl, apply_call};
 use viewport_actions::{
     CommandInvocation, PickerFlow, PickerHost, ShortcutScope, ViewportAction,
     collect_shortcut_actions, command_palette_host_after_toggle, picker_host_after_close,
@@ -545,6 +549,7 @@ pub struct DelogApp {
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
     settings_dialog: SettingsDialog,
+    external_api: crate::shell::external_api::ExternalApiController,
     tile_manager: Option<TileManager>,
     tile_manager_error: Option<String>,
     theme_needs_apply: bool,
@@ -613,6 +618,10 @@ impl DelogApp {
         let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
+        let external_api = crate::shell::external_api::ExternalApiController::new(
+            cc.egui_ctx.clone(),
+            control_host.clone(),
+        );
         Self {
             session,
             control_host: Arc::clone(&control_host),
@@ -719,6 +728,7 @@ impl DelogApp {
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
             settings_dialog: SettingsDialog::default(),
+            external_api,
             tile_manager,
             tile_manager_error,
             theme_needs_apply: false,
@@ -2298,6 +2308,7 @@ impl DelogApp {
                     self.annotation_toolbar_open = !self.annotation_toolbar_open;
                 }
                 CommandId::OpenSettings => self.settings_dialog.open(),
+                CommandId::OpenExternalApi => self.settings_dialog.open_external_api(),
                 CommandId::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 CommandId::TogglePlayback => self.playback.toggle(),
                 CommandId::JumpStart => self.playback.jump_start(range),
@@ -3023,6 +3034,12 @@ impl DelogApp {
 
 impl eframe::App for DelogApp {
     fn on_exit(&mut self) {
+        if let Err(error) = self.external_api.disable() {
+            self.push_log(crate::ui::logging::log(
+                LogLevel::Error,
+                format!("External API did not shut down cleanly: {error}"),
+            ));
+        }
         let snapshot = self.session.snapshot();
         let _ = self.autosave_session(&snapshot, true);
         let _ = crate::config::layout::doc::save_app_settings(&self.settings);
@@ -3691,6 +3708,7 @@ impl eframe::App for DelogApp {
             self.show_about = crate::ui::about::show(ui.ctx());
         }
         crate::ui::message_popup::show_all(&mut self.message_popups, ui.ctx());
+        let mut external_api_logs = self.external_api.frame(ui.ctx(), &snapshot);
         let settings_before = self
             .settings_dialog
             .is_open()
@@ -3712,9 +3730,26 @@ impl eframe::App for DelogApp {
                         ),
                     }
                 });
-        let settings_change = self
-            .settings_dialog
-            .show(ui.ctx(), &mut self.settings, tile_cache);
+        let external_api = &mut self.external_api;
+        let external_store = self.session.store();
+        let external_ingest = self.session.ingest_sender();
+        let mut external_api_tab = |ui: &mut egui::Ui| {
+            external_api_logs.extend(external_api.settings_ui(
+                ui,
+                &snapshot,
+                Arc::clone(&external_store),
+                external_ingest.clone(),
+            ));
+        };
+        let settings_change = self.settings_dialog.show(
+            ui.ctx(),
+            &mut self.settings,
+            tile_cache,
+            &mut external_api_tab,
+        );
+        for (level, message) in external_api_logs {
+            self.push_log(crate::ui::logging::log(level, message));
+        }
         if settings_change.position_filter_changed {
             self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
             self.traj_dirty = true;
