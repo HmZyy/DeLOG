@@ -5,8 +5,7 @@ pub mod interact;
 pub mod place;
 pub mod toolbar;
 
-#[cfg(feature = "scripting")]
-use delog_api::control::{AnnotationGeometry, AnnotationKind, AnnotationStylePatch, ScriptOwner};
+use delog_api::control::{AnnotationGeometry, AnnotationKind, AnnotationStylePatch};
 
 use crate::plotting::gpu::PaneView;
 
@@ -222,21 +221,7 @@ pub fn default_geometry(kind: Kind, at: DataPos, span_us: i64, y_span: f64) -> G
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnnotationOwner {
-    pub name: String,
-    pub generation: u64,
-}
-
-#[cfg(feature = "scripting")]
-impl From<ScriptOwner> for AnnotationOwner {
-    fn from(owner: ScriptOwner) -> Self {
-        Self {
-            name: owner.name,
-            generation: owner.generation,
-        }
-    }
-}
+pub type AnnotationOwner = delog_api::control::ResourceOwner;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
@@ -247,7 +232,6 @@ pub struct Annotation {
     pub owner: Option<AnnotationOwner>,
 }
 
-#[cfg(feature = "scripting")]
 impl Kind {
     pub fn to_script(self) -> AnnotationKind {
         match self {
@@ -260,7 +244,6 @@ impl Kind {
     }
 }
 
-#[cfg(feature = "scripting")]
 impl Geometry {
     pub fn from_script(geometry: AnnotationGeometry) -> Self {
         let pos = |(t_us, y): (i64, f64)| DataPos { t_us, y };
@@ -297,7 +280,6 @@ impl Geometry {
     }
 }
 
-#[cfg(feature = "scripting")]
 impl Annotation {
     pub fn apply_style_patch(&mut self, patch: AnnotationStylePatch) {
         if let Some(color) = patch.color {
@@ -396,7 +378,6 @@ impl AnnotationLayer {
         }
     }
 
-    #[cfg(feature = "scripting")]
     pub fn retain(&mut self, keep: impl Fn(&Annotation) -> bool) {
         let doomed: Vec<u64> = self
             .items

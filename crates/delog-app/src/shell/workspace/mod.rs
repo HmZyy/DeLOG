@@ -7,7 +7,6 @@ use std::sync::{
 };
 use std::time::Instant;
 
-#[cfg(feature = "scripting")]
 use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_cache::CacheManager;
 use delog_core::identity::FieldId;
@@ -175,10 +174,14 @@ impl Workspace {
     }
 
     pub fn new_for(window: crate::shell::windows::WindowId) -> Self {
+        Self::with_tree_id(egui::Id::new(("plot_workspace", window.0)))
+    }
+
+    fn with_tree_id(tree_id: egui::Id) -> Self {
         let mut tiles = egui_tiles::Tiles::default();
         let root = tiles.insert_pane(Pane::Plot(PlotPane::default()));
         Self {
-            tree: egui_tiles::Tree::new(egui::Id::new(("plot_workspace", window.0)), root, tiles),
+            tree: egui_tiles::Tree::new(tree_id, root, tiles),
             focused: None,
             shared_y_gutter: 0.0,
             default_show_legend: true,
@@ -300,14 +303,14 @@ impl Workspace {
                 if let Some(field) = resolve_ghost(snapshot, &ghost) {
                     if !pane.traces.iter().any(|t| t.field == field) {
                         pane.traces.push(TraceRef {
+                            instance_id: crate::plotting::plot::next_resource_instance_id(),
                             field,
                             color: ghost.color,
                             width_px: ghost.width_px,
                             mode: ghost.mode,
                             visible: ghost.visible,
                             label_override: None,
-                            #[cfg(feature = "scripting")]
-                            owner: None,
+                            owner: ghost.owner.clone(),
                         });
                         apply_ghost_text_state(pane, &ghost, field);
                         resolved += 1;
@@ -600,8 +603,14 @@ impl Workspace {
         let previous_focus = self.focused;
         let closing_root = self.tree.root() == Some(tile_id);
         let removed = self.tree.remove_recursively(tile_id);
-        if closing_root || self.plot_panes().next().is_none() {
-            *self = Self::new();
+        if closing_root
+            || !self
+                .tree
+                .tiles
+                .tiles()
+                .any(|tile| matches!(tile, egui_tiles::Tile::Pane(_)))
+        {
+            *self = Self::with_tree_id(self.tree.id());
             self.focused = previous_focus;
         }
         self.repair_focus();
@@ -625,7 +634,6 @@ impl Workspace {
         })
     }
 
-    #[cfg(feature = "scripting")]
     pub(crate) fn plot_pane_mut(&mut self, tile: egui_tiles::TileId) -> Option<&mut PlotPane> {
         match self.tree.tiles.get_mut(tile)? {
             egui_tiles::Tile::Pane(Pane::Plot(pane)) => Some(pane),
@@ -646,7 +654,6 @@ impl Workspace {
         plots
     }
 
-    #[cfg(feature = "scripting")]
     pub fn plot_infos(&self, window: u64) -> Vec<PlotInfo> {
         self.plot_tiles_in_order()
             .into_iter()
@@ -654,13 +661,20 @@ impl Workspace {
             .map(|(index, tile)| PlotInfo {
                 window,
                 tile: tile.0,
+                instance_id: match self.tree.tiles.get(tile) {
+                    Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.instance_id,
+                    _ => unreachable!("plot_tiles_in_order returned a non-plot tile"),
+                },
                 index,
                 label: format!("Plot {}", index + 1),
+                owner: match self.tree.tiles.get(tile) {
+                    Some(egui_tiles::Tile::Pane(Pane::Plot(pane))) => pane.owner.clone(),
+                    _ => None,
+                },
             })
             .collect()
     }
 
-    #[cfg(feature = "scripting")]
     pub fn annotation_infos(&self, window: u64) -> Vec<AnnotationInfo> {
         let mut infos = Vec::new();
         for tile in self.plot_tiles_in_order() {
@@ -782,7 +796,6 @@ impl Default for Workspace {
     }
 }
 
-#[cfg(feature = "scripting")]
 pub(crate) fn annotation_infos_for_pane(
     window: u64,
     tile: u64,
@@ -793,6 +806,7 @@ pub(crate) fn annotation_infos_for_pane(
         .iter()
         .enumerate()
         .map(|(index, annotation)| AnnotationInfo {
+            plot_instance_id: pane.instance_id,
             window,
             tile,
             id: annotation.id,
@@ -2329,6 +2343,7 @@ fn script_ghost_from_removed_trace(
     }
     let (text_filter, text_offsets) = take_text_state(pane, trace.field);
     Some(GhostTrace {
+        owner: trace.owner,
         source: Some(source.entry.label.clone()),
         topic: topic.entry.name.clone(),
         field: field.name.clone(),

@@ -41,6 +41,7 @@ impl ControlHost for Recorder {
                     .filter(|info| info.window == window && info.tile == tile)
                     .count();
                 let info = AnnotationInfo {
+                    plot_instance_id: 1,
                     window,
                     tile,
                     id,
@@ -72,6 +73,8 @@ impl ControlHost for Recorder {
 
 fn plot_fixture() -> PlotInfo {
     PlotInfo {
+        instance_id: 1,
+        owner: None,
         window: 0,
         tile: 7,
         index: 0,
@@ -81,6 +84,8 @@ fn plot_fixture() -> PlotInfo {
 
 fn plot_fixture_b() -> PlotInfo {
     PlotInfo {
+        instance_id: 1,
+        owner: None,
         window: 0,
         tile: 8,
         index: 1,

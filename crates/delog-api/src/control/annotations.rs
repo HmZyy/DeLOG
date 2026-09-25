@@ -1,4 +1,4 @@
-use super::ScriptOwner;
+use super::ResourceOwner;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,21 @@ pub enum AnnotationGeometry {
 }
 
 impl AnnotationGeometry {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Text { at } => validate_point(*at, "at"),
+            Self::Segment { from, to } => {
+                validate_point(*from, "from")?;
+                validate_point(*to, "to")
+            }
+            Self::Rect { a, b } | Self::Ellipse { a, b } => {
+                validate_point(*a, "a")?;
+                validate_point(*b, "b")
+            }
+            Self::HLine { y } => validate_f64(*y, "y"),
+        }
+    }
+
     pub fn text(at: (i64, f64)) -> Result<Self> {
         validate_point(at, "at")?;
         Ok(Self::Text { at })
@@ -145,9 +160,35 @@ impl AnnotationStylePatch {
     }
 
     pub fn validate(&self) -> Result<()> {
-        validate_f32(self.stroke_px, "stroke_px")?;
-        validate_f32(self.fill_opacity, "fill_opacity")?;
-        validate_f32(self.font_px, "font_px")
+        let Self {
+            color,
+            stroke_px,
+            fill_opacity,
+            font_px,
+            arrow: _,
+        } = self;
+        if let Some(color) = color
+            && !color
+                .iter()
+                .all(|component| component.is_finite() && (0.0..=1.0).contains(component))
+        {
+            return Err(Error::invalid_input(
+                "annotation color components must be finite and between 0 and 1",
+            ));
+        }
+        validate_f32(*stroke_px, "stroke_px")?;
+        validate_f32(*fill_opacity, "fill_opacity")?;
+        validate_f32(*font_px, "font_px")?;
+        if stroke_px.is_some_and(|value| value <= 0.0) {
+            return Err(Error::invalid_input("stroke_px must be > 0"));
+        }
+        if fill_opacity.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
+            return Err(Error::invalid_input("fill_opacity must be between 0 and 1"));
+        }
+        if font_px.is_some_and(|value| value <= 0.0) {
+            return Err(Error::invalid_input("font_px must be > 0"));
+        }
+        Ok(())
     }
 }
 
@@ -184,6 +225,7 @@ pub enum AnnotationFilter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationInfo {
+    pub plot_instance_id: u64,
     pub window: u64,
     pub tile: u64,
     pub id: u64,
@@ -203,7 +245,7 @@ pub enum AnnotationRequest {
         geometry: AnnotationGeometry,
         label: String,
         style: AnnotationStylePatch,
-        owner: Option<ScriptOwner>,
+        owner: Option<ResourceOwner>,
     },
     List {
         target: Option<(u64, u64)>,
@@ -220,4 +262,51 @@ pub enum AnnotationRequest {
         geometry: Option<AnnotationGeometry>,
         style: AnnotationStylePatch,
     },
+}
+
+impl AnnotationRequest {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Add {
+                window: _,
+                tile: _,
+                geometry,
+                label: _,
+                style,
+                owner,
+            } => {
+                geometry.validate()?;
+                style.validate()?;
+                if let Some(owner) = owner {
+                    owner.validate()?;
+                }
+                Ok(())
+            }
+            Self::List { target: _ } => Ok(()),
+            Self::Remove { target: _, filter } => match filter {
+                AnnotationFilter::Owner(owner) if owner.is_empty() => {
+                    Err(Error::invalid_input("annotation owner must not be empty"))
+                }
+                AnnotationFilter::Index(_)
+                | AnnotationFilter::Id(_)
+                | AnnotationFilter::Kind(_)
+                | AnnotationFilter::Label(_)
+                | AnnotationFilter::Owner(_)
+                | AnnotationFilter::All => Ok(()),
+            },
+            Self::Set {
+                window: _,
+                tile: _,
+                id: _,
+                label: _,
+                geometry,
+                style,
+            } => {
+                if let Some(geometry) = geometry {
+                    geometry.validate()?;
+                }
+                style.validate()
+            }
+        }
+    }
 }

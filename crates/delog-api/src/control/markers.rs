@@ -48,10 +48,16 @@ pub struct MarkerPatch {
 
 impl MarkerPatch {
     pub fn validate(&self) -> Result<()> {
-        if self.label.as_deref() == Some("") {
+        let Self {
+            t_us: _,
+            label,
+            color,
+            note: _,
+        } = self;
+        if label.as_deref() == Some("") {
             return Err(Error::invalid_input("marker label must not be empty"));
         }
-        if let Some(color) = self.color
+        if let Some(color) = color
             && !color
                 .iter()
                 .all(|component| component.is_finite() && (0.0..=1.0).contains(component))
@@ -80,6 +86,17 @@ pub enum MarkerFilter {
 }
 
 impl MarkerFilter {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Owner(owner) => Self::owner(owner.clone()).map(|_| ()),
+            Self::ScriptLabel(label) => Self::script_label(label.clone()).map(|_| ()),
+            Self::ScriptTimeRange { after, before } => {
+                Self::time_range(*after, *before).map(|_| ())
+            }
+            Self::Id(_) | Self::Index(_) | Self::Origin(_) | Self::ScriptAll | Self::All => Ok(()),
+        }
+    }
+
     pub fn owner(owner: String) -> Result<Self> {
         if owner.is_empty() {
             return Err(Error::invalid_input("marker owner must not be empty"));
@@ -111,6 +128,11 @@ pub enum MarkerRequest {
         generation: u64,
         markers: Vec<PendingMarker>,
     },
+    AppendReturning {
+        owner: String,
+        generation: u64,
+        marker: PendingMarker,
+    },
     RemoveOwned {
         owner: String,
     },
@@ -120,4 +142,51 @@ pub enum MarkerRequest {
         patch: MarkerPatch,
     },
     Remove(MarkerFilter),
+}
+
+impl MarkerRequest {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::AppendReturning {
+                owner,
+                generation,
+                marker,
+            } => Self::Append {
+                owner: owner.clone(),
+                generation: *generation,
+                markers: vec![marker.clone()],
+            }
+            .validate(),
+            Self::Append {
+                owner,
+                generation: _,
+                markers,
+            } => {
+                if owner.is_empty() {
+                    return Err(Error::invalid_input("marker owner must not be empty"));
+                }
+                for marker in markers {
+                    let PendingMarker {
+                        time_us: _,
+                        label,
+                        color,
+                        note: _,
+                    } = marker;
+                    if label.is_empty() {
+                        return Err(Error::invalid_input("marker label must not be empty"));
+                    }
+                    MarkerPatch {
+                        color: *color,
+                        ..MarkerPatch::default()
+                    }
+                    .validate()?;
+                }
+                Ok(())
+            }
+            Self::RemoveOwned { owner } => MarkerFilter::owner(owner.clone()).map(|_| ()),
+            Self::List => Ok(()),
+            Self::Set { id: _, patch } => patch.validate(),
+            Self::Remove(filter) => filter.validate(),
+        }
+    }
 }

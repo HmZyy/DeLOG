@@ -49,9 +49,9 @@ impl ControlHost for ProfileHost {
             ControlRequest::VehicleProfiles(VehicleProfileRequest::List) => {
                 Ok(ControlResponse::Names(vec!["quad-gps".to_owned()]))
             }
-            ControlRequest::VehicleProfiles(VehicleProfileRequest::Load { name }) => {
-                Ok(ControlResponse::VehicleProfile(profile_fixture(name)))
-            }
+            ControlRequest::VehicleProfiles(VehicleProfileRequest::Load { name }) => Ok(
+                ControlResponse::VehicleProfile(Box::new(profile_fixture(name))),
+            ),
             ControlRequest::VehicleProfiles(VehicleProfileRequest::Apply {
                 source_id,
                 source,

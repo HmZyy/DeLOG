@@ -1,4 +1,3 @@
-#[cfg(feature = "scripting")]
 use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_core::identity::FieldId;
 
@@ -44,6 +43,7 @@ pub struct WindowBrowser {
 
 #[derive(Clone)]
 pub struct ExtendedWindow {
+    pub owner: Option<delog_api::control::ResourceOwner>,
     pub id: WindowId,
     pub title: String,
     pub workspace: Workspace,
@@ -54,6 +54,7 @@ pub struct ExtendedWindow {
 impl ExtendedWindow {
     pub fn new(id: WindowId) -> Self {
         Self {
+            owner: None,
             id,
             title: id.title(),
             workspace: Workspace::new_for(id),
@@ -68,8 +69,18 @@ impl ExtendedWindow {
         window
     }
 
+    pub fn rebind_runtime_id(&mut self, id: WindowId) {
+        let tree_id = egui::Id::new(("plot_workspace", id.0));
+        let previous_tree =
+            std::mem::replace(&mut self.workspace.tree, egui_tiles::Tree::empty(tree_id));
+        self.workspace.tree.root = previous_tree.root;
+        self.workspace.tree.tiles = previous_tree.tiles;
+        self.id = id;
+    }
+
     pub fn placeholder(id: WindowId) -> Self {
         Self {
+            owner: None,
             id,
             title: String::new(),
             workspace: Workspace::placeholder(),
@@ -100,8 +111,26 @@ pub fn tree_scope(window: WindowId) -> &'static str {
     }
 }
 
-pub fn next_window_id(windows: &[ExtendedWindow]) -> u64 {
-    windows.iter().map(|window| window.id.0).max().unwrap_or(0) + 1
+pub fn install_restored_windows(
+    windows: &mut Vec<ExtendedWindow>,
+    next_window_id: &mut u64,
+    mut restored: Vec<ExtendedWindow>,
+) -> Result<(), &'static str> {
+    const EXHAUSTED: &str = "window runtime ID space is exhausted";
+    let highest = windows
+        .iter()
+        .chain(&restored)
+        .map(|window| window.id.0)
+        .max()
+        .unwrap_or(0);
+    let first = (*next_window_id).max(highest.checked_add(1).ok_or(EXHAUSTED)?);
+    let next = first.checked_add(restored.len() as u64).ok_or(EXHAUSTED)?;
+    for (id, window) in (first..).zip(restored.iter_mut()) {
+        window.rebind_runtime_id(WindowId(id));
+    }
+    *windows = restored;
+    *next_window_id = next;
+    Ok(())
 }
 
 pub fn open_window(
@@ -157,7 +186,6 @@ pub fn fields_only_in(
     released
 }
 
-#[cfg(feature = "scripting")]
 pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<PlotInfo> {
     let mut infos = main.plot_infos(0);
     for window in windows {
@@ -166,7 +194,6 @@ pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<PlotInfo>
     infos
 }
 
-#[cfg(feature = "scripting")]
 pub fn annotation_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<AnnotationInfo> {
     let mut infos = main.annotation_infos(0);
     for window in windows {

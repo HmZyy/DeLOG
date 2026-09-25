@@ -146,11 +146,7 @@ pub enum OriMapping {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VehicleOwner {
-    pub name: String,
-    pub generation: u64,
-}
+pub type VehicleOwner = delog_api::control::ResourceOwner;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VehicleRuntime {

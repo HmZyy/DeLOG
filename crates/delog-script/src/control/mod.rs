@@ -67,7 +67,7 @@ mod tests {
     fn recording_host_preserves_vehicle_requests() {
         let host = Arc::new(RecordingHost::default());
         let _guard = install_host(Some(host.clone()));
-        let request = ControlRequest::Vehicles(VehicleRequest::List);
+        let request = ControlRequest::Vehicles(Box::new(VehicleRequest::List));
         Python::attach(|py| call_immediate_detached(py, request.clone())).unwrap();
         assert_eq!(host.taken(), vec![request]);
     }

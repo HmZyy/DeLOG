@@ -19,6 +19,8 @@ impl ControlHost for Recorder {
         match request {
             ControlRequest::Traces(TraceRequest::List { .. }) => {
                 Ok(ControlResponse::Traces(vec![TraceInfo {
+                    instance_id: 1,
+                    owner: None,
                     index: 0,
                     field_id: FieldId(0),
                     field: "IMU.AccX".into(),
@@ -36,6 +38,8 @@ impl ControlHost for Recorder {
 
 fn plot_fixture() -> PlotInfo {
     PlotInfo {
+        instance_id: 1,
+        owner: None,
         window: 0,
         tile: 7,
         index: 0,

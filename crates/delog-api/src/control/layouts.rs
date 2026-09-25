@@ -28,6 +28,33 @@ pub enum LayoutRequest {
     Apply { json: String },
 }
 
+impl LayoutRequest {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::List | Self::Clear | Self::Current => Ok(()),
+            Self::Save { name } | Self::Load { name } | Self::Delete { name } => {
+                validate_layout_name(name).map(|_| ())
+            }
+            Self::Rename { from, to } | Self::Duplicate { from, to } => {
+                validate_layout_name(from)?;
+                validate_layout_name(to).map(|_| ())
+            }
+            Self::ImportFile { path } => validate_layout_path(path).map(|_| ()),
+            Self::ExportFile { name, path } => {
+                validate_layout_name(name)?;
+                validate_layout_path(path).map(|_| ())
+            }
+            Self::Apply { json } => {
+                if json.trim().is_empty() {
+                    Err(Error::invalid_input("layout JSON must not be empty"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
 pub fn validate_layout_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty()

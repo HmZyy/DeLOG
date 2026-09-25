@@ -1,6 +1,29 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn native_control_queue_and_ownership_are_unconditional() {
+    let app = include_str!("../src/shell/app/mod.rs");
+    let queue = include_str!("../src/shell/app/control_queue.rs");
+
+    for module in ["control_ownership", "control_queue", "control_service"] {
+        let declaration = format!("mod {module};");
+        let lines: Vec<_> = app.lines().collect();
+        let position = lines
+            .iter()
+            .position(|line| line.trim() == declaration)
+            .unwrap_or_else(|| panic!("{module} must be declared in the app"));
+        assert!(
+            position == 0 || !lines[position - 1].trim_start().starts_with("#[cfg("),
+            "{module} must be compiled without a feature gate"
+        );
+    }
+
+    assert!(app.contains("control_queue::AppControlHost"));
+    assert!(queue.contains("pub struct AppControlHost"));
+    assert!(!app.contains("cfg(feature = \"scripting\")\npub mod control_host"));
+}
+
 const LAYER_RANKS: &[(&str, u32)] = &[
     ("ui", 0),
     ("scene3d", 0),

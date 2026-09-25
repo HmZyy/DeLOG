@@ -2,6 +2,127 @@ use super::*;
 use delog_core::identity::{FieldId, IdentityRegistry};
 
 #[test]
+fn externally_owned_window_and_plot_round_trip_by_name() {
+    use crate::shell::windows::{ExtendedWindow, WindowId};
+    use delog_api::control::ResourceOwner;
+
+    let owner = ResourceOwner {
+        name: "flight-diagnosis".into(),
+        generation: 7,
+    };
+    let mut window = ExtendedWindow::new(WindowId(1));
+    window.owner = Some(owner.clone());
+    window.workspace.plot_panes_mut().next().unwrap().owner = Some(owner);
+    let workspace = Workspace::new();
+    let snapshot = StoreSnapshot::empty();
+    let doc = current_doc(CurrentLayout {
+        name: "owned".into(),
+        workspace: &workspace,
+        windows: &[window],
+        snapshot: &snapshot,
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+    assert_eq!(doc.windows[0].owner.as_deref(), Some("flight-diagnosis"));
+    let LayoutNode::Plot { owner, .. } = &doc.windows[0].root else {
+        panic!("plot");
+    };
+    assert_eq!(owner.as_deref(), Some("flight-diagnosis"));
+    let doc = crate::config::layout::doc::decode_doc(
+        &crate::config::layout::doc::doc_json(&doc).unwrap(),
+    )
+    .unwrap();
+    let LoadOutcome::Applied(restored) = load_doc(doc, &snapshot).unwrap() else {
+        panic!("applied");
+    };
+    let expected = ResourceOwner {
+        name: "flight-diagnosis".into(),
+        generation: 0,
+    };
+    assert_eq!(restored.windows[0].owner.as_ref(), Some(&expected));
+    assert_eq!(
+        restored.windows[0]
+            .workspace
+            .plot_panes()
+            .next()
+            .unwrap()
+            .owner
+            .as_ref(),
+        Some(&expected)
+    );
+    assert_eq!(restored.workspace.plot_panes().next().unwrap().owner, None);
+}
+
+#[test]
+fn owned_traces_survive_layout_restore_before_and_after_schema_arrives() {
+    use delog_api::control::ResourceOwner;
+    let snapshot = snapshot_with_topics(&[("flight", "ATT", &["roll"])]);
+    let mut workspace = Workspace::new();
+    let pane = workspace.plot_panes_mut().next().unwrap();
+    pane.add_trace(FieldId(0));
+    pane.traces[0].owner = Some(ResourceOwner {
+        name: "analysis".into(),
+        generation: 9,
+    });
+    let doc = current_doc(CurrentLayout {
+        name: "owned".into(),
+        workspace: &workspace,
+        windows: &[],
+        snapshot: &snapshot,
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+    let LayoutNode::Plot { traces, .. } = &doc.workspace.root else {
+        panic!("plot");
+    };
+    assert_eq!(traces[0].owner.as_deref(), Some("analysis"));
+    let expected = ResourceOwner {
+        name: "analysis".into(),
+        generation: 0,
+    };
+    let LoadOutcome::Applied(restored) = load_doc(doc.clone(), &snapshot).unwrap() else {
+        panic!("applied");
+    };
+    assert_eq!(
+        restored.workspace.plot_panes().next().unwrap().traces[0]
+            .owner
+            .as_ref(),
+        Some(&expected)
+    );
+    let LoadOutcome::Applied(mut restored) = load_doc(doc, &StoreSnapshot::empty()).unwrap() else {
+        panic!("applied");
+    };
+    assert_eq!(
+        restored.workspace.plot_panes().next().unwrap().ghosts[0]
+            .owner
+            .as_ref(),
+        Some(&expected)
+    );
+    let saved_ghost = current_doc(CurrentLayout {
+        name: "ghost".into(),
+        workspace: &restored.workspace,
+        windows: &[],
+        snapshot: &StoreSnapshot::empty(),
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+    let LayoutNode::Plot { traces, .. } = &saved_ghost.workspace.root else {
+        panic!("plot");
+    };
+    assert_eq!(traces[0].owner.as_deref(), Some("analysis"));
+    assert_eq!(restored.workspace.resolve_ghosts(&snapshot), 1);
+    assert_eq!(
+        restored.workspace.plot_panes().next().unwrap().traces[0]
+            .owner
+            .as_ref(),
+        Some(&expected)
+    );
+}
+
+#[test]
 fn legacy_transient_state_is_ignored_and_not_reserialized() {
     let doc = crate::config::layout::doc::decode_doc(
         r#"{
@@ -136,8 +257,10 @@ fn load_report_tracks_ambiguous_unresolved_and_non_resolution_warnings_structura
     ]);
     let mut doc = empty_doc("report");
     doc.workspace.root = LayoutNode::Plot {
+        owner: None,
         traces: vec![
             TraceLayout {
+                owner: None,
                 field: FieldRef {
                     topic: "ATT".into(),
                     field: "roll".into(),
@@ -148,6 +271,7 @@ fn load_report_tracks_ambiguous_unresolved_and_non_resolution_warnings_structura
                 visible: true,
             },
             TraceLayout {
+                owner: None,
                 field: FieldRef {
                     topic: "GPS".into(),
                     field: "alt".into(),
@@ -158,6 +282,7 @@ fn load_report_tracks_ambiguous_unresolved_and_non_resolution_warnings_structura
                 visible: true,
             },
             TraceLayout {
+                owner: None,
                 field: FieldRef {
                     topic: "GPS".into(),
                     field: "alt".into(),
@@ -453,6 +578,7 @@ fn an_annotation_whose_points_do_not_match_its_kind_is_skipped_and_reported() {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -557,22 +683,25 @@ fn a_saved_window_keeps_its_id_so_a_later_window_cannot_reuse_its_title() {
     assert_eq!(applied.windows[0].id, WindowId(2));
     assert_eq!(applied.windows[0].title, "DeLOG · Window 2");
 
-    let fresh = crate::shell::windows::next_window_id(&applied.windows);
-    assert_eq!(fresh, 3, "the next window must not reuse a restored id");
-    assert_ne!(
-        ExtendedWindow::new(WindowId(fresh)).title,
-        applied.windows[0].title
-    );
+    let mut windows = Vec::new();
+    let mut fresh = 1;
+    crate::shell::windows::install_restored_windows(&mut windows, &mut fresh, applied.windows)
+        .unwrap();
+    assert_eq!(windows[0].id, WindowId(3));
+    assert_eq!(fresh, 4, "the next window must not reuse a restored id");
+    assert_ne!(ExtendedWindow::new(WindowId(fresh)).title, windows[0].title);
 }
 
 #[test]
 fn window_ids_fall_back_to_position_and_never_collide() {
     fn layout(id: Option<u64>) -> WindowLayout {
         WindowLayout {
+            owner: None,
             id,
             title: String::new(),
             size: MIN_WINDOW_SIZE,
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -610,6 +739,7 @@ fn a_scene_node_in_an_extended_window_layout_becomes_a_plot() {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -617,6 +747,7 @@ fn a_scene_node_in_an_extended_window_layout_becomes_a_plot() {
             },
         },
         windows: vec![WindowLayout {
+            owner: None,
             id: None,
             title: "DeLOG · Window 1".to_owned(),
             size: [1280.0, 800.0],
@@ -655,6 +786,7 @@ fn a_field_ambiguous_only_inside_an_extended_window_is_flagged_for_mapping() {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -662,11 +794,14 @@ fn a_field_ambiguous_only_inside_an_extended_window_is_flagged_for_mapping() {
             },
         },
         windows: vec![WindowLayout {
+            owner: None,
             id: None,
             title: "DeLOG · Window 1".to_owned(),
             size: [1280.0, 800.0],
             root: LayoutNode::Plot {
+                owner: None,
                 traces: vec![TraceLayout {
+                    owner: None,
                     field: FieldRef {
                         topic: "ATT".to_owned(),
                         field: "Roll".to_owned(),
@@ -725,6 +860,7 @@ fn empty_doc(name: &str) -> LayoutDoc {
         },
         workspace: WorkspaceLayout {
             root: LayoutNode::Plot {
+                owner: None,
                 traces: Vec::new(),
                 show_legend: true,
                 show_tooltip: true,
@@ -748,4 +884,39 @@ fn plot_trace_counts(workspace: &Workspace) -> (usize, usize) {
             _ => None,
         })
         .fold((0, 0), |(traces, ghosts), (t, g)| (traces + t, ghosts + g))
+}
+
+#[test]
+fn a_ui_layout_load_never_reuses_the_id_of_a_closed_window() {
+    let snapshot = StoreSnapshot::empty();
+    let mut open = Vec::new();
+    let mut next_window_id = 1;
+    crate::shell::windows::open_window(&mut open, &mut next_window_id, None);
+    crate::shell::windows::open_window(&mut open, &mut next_window_id, None);
+    crate::shell::windows::open_window(&mut open, &mut next_window_id, None);
+    let doc = current_doc(CurrentLayout {
+        name: "saved".to_owned(),
+        workspace: &Workspace::new(),
+        windows: &open[2..],
+        snapshot: &snapshot,
+        speed: 1.0,
+        follow_live: false,
+        vehicles: &[],
+    });
+    open.clear();
+
+    let LoadOutcome::Applied(applied) = load_doc(doc, &snapshot).expect("the document should load")
+    else {
+        panic!("a document with no ambiguity should apply directly");
+    };
+    assert_eq!(applied.windows[0].id, WindowId(3));
+    crate::shell::windows::install_restored_windows(
+        &mut open,
+        &mut next_window_id,
+        applied.windows,
+    )
+    .unwrap();
+
+    assert_eq!(open[0].id, WindowId(4));
+    assert_eq!(next_window_id, 5);
 }

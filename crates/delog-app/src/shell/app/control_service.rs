@@ -1,28 +1,34 @@
 use delog_api::control::{
-    AnnotationFilter, AnnotationInfo, AnnotationRequest, ControlRequest, ControlResponse,
-    PlaybackRequest, PlotInfo, PlotRequest, ScriptOwner, SplitDirection as ScriptSplitDirection,
-    TraceInfo, TraceMode as ScriptTraceMode, TraceRequest, VehicleFilter, VehicleInfo,
+    AnnotationFilter, AnnotationInfo, AnnotationRequest, ControlCall, ControlRequest,
+    ControlResponse, PlaybackInfo, PlaybackRequest, PlotInfo, PlotRequest, ResourceGuard,
+    ScriptOwner, SplitDirection as ScriptSplitDirection, VehicleFilter, VehicleInfo,
     VehicleNedReference as ScriptNedReference, VehicleOrientation as ScriptVehicleOrientation,
-    VehiclePatch, VehiclePosition, VehicleRequest, VehicleSpec, WorkspaceRequest,
+    VehiclePatch, VehiclePosition, VehicleRequest, VehicleSpec, WorkspaceInfo, WorkspaceRequest,
 };
+use delog_api::{Error, Result};
 use delog_cache::CacheManager;
-use delog_core::identity::FieldId;
 use delog_core::snapshot::StoreSnapshot;
+
+#[cfg(test)]
+use delog_api::control::TraceRequest;
+#[cfg(test)]
+use delog_core::identity::FieldId;
 
 mod batch;
 mod layouts;
 mod profiles;
+mod trace_mapping;
 mod vehicle_mapping;
 
 use batch::{apply_batch, trace_counts, unpin_removed_traces};
 pub use layouts::LayoutControlEffects;
 use layouts::apply_layout_request;
 use profiles::apply_vehicle_profile_request;
+use trace_mapping::apply_trace_request;
 use vehicle_mapping::*;
 
-use crate::plotting::legend::trace_label;
 use crate::plotting::markers::Markers;
-use crate::plotting::plot::{PlotPane, TraceMode as PlotTraceMode, TraceRef};
+use crate::plotting::plot::PlotPane;
 use crate::plotting::timeline::Playback;
 use crate::shell::app::control_ownership;
 use crate::shell::workspace::Workspace;
@@ -42,23 +48,44 @@ pub struct AppControl<'a> {
     pub vehicle_profiles: Option<&'a crate::session::vehicle_profiles::VehicleProfileLibrary>,
 }
 
-pub fn apply(
-    control: &mut AppControl<'_>,
-    request: ControlRequest,
-) -> Result<ControlResponse, String> {
+pub fn apply(control: &mut AppControl<'_>, request: ControlRequest) -> Result<ControlResponse> {
+    if let Err(error) = request.validate() {
+        if let ControlRequest::Batch(requests) = &request {
+            batch::rollback_terminal_commit_for_batch(control, requests);
+        }
+        return Err(error);
+    }
     if let ControlRequest::Batch(requests) = request {
         return apply_batch(control, requests);
     }
     apply_one(control, request)
 }
 
-fn apply_one(
-    control: &mut AppControl<'_>,
-    request: ControlRequest,
-) -> Result<ControlResponse, String> {
+pub fn apply_call(control: &mut AppControl<'_>, call: ControlCall) -> Result<ControlResponse> {
+    match call {
+        ControlCall::Trusted(request) => apply(control, request),
+        ControlCall::External {
+            principal,
+            request: ControlRequest::Batch(requests),
+        } => batch::apply_authorized_batch(control, &principal, requests),
+        ControlCall::External { principal, request } => {
+            let request = super::control_policy::authorize_and_stamp(control, &principal, request)?;
+            apply(control, request)
+        }
+    }
+}
+
+fn apply_one(control: &mut AppControl<'_>, request: ControlRequest) -> Result<ControlResponse> {
     match request {
+        ControlRequest::Guarded { guard, request } => {
+            verify_guard(control, guard)?;
+            apply_one(control, *request)
+        }
         ControlRequest::Markers(request) => control.markers.apply_control_request(request),
         ControlRequest::Plots(PlotRequest::List { window }) => {
+            if let Some(window) = window {
+                workspace_for(control, window)?;
+            }
             let all = crate::shell::windows::plot_infos(control.workspace, control.windows);
             Ok(ControlResponse::Plots(match window {
                 Some(id) => all.into_iter().filter(|info| info.window == id).collect(),
@@ -79,23 +106,73 @@ fn apply_one(
         ControlRequest::Annotations(request) => apply_annotation_request(control, request),
         ControlRequest::Generation(request) => {
             let sweep = control_ownership::Sweep::from(request);
-            control_ownership::apply_sweep(control, &sweep);
-            Ok(ControlResponse::Unit)
+            let removed = control_ownership::apply_sweep(control, &sweep);
+            Ok(match sweep {
+                control_ownership::Sweep::RemoveOwned { .. } => ControlResponse::Removed(removed),
+                _ => ControlResponse::Unit,
+            })
         }
         ControlRequest::Workspace(request) => apply_workspace_request(control, request),
         ControlRequest::Playback(request) => apply_playback_request(control, request),
-        ControlRequest::Vehicles(request) => apply_vehicle_request(control, request),
+        ControlRequest::Vehicles(request) => apply_vehicle_request(control, *request),
         ControlRequest::VehicleProfiles(request) => apply_vehicle_profile_request(control, request),
         ControlRequest::Layouts(request) => apply_layout_request(control, request),
-        ControlRequest::Batch(_) => Err("nested control batches are not supported".into()),
+        ControlRequest::Batch(_) => Err(Error::invalid_input(
+            "nested control batches are not supported",
+        )),
     }
+}
+
+fn verify_guard(control: &mut AppControl<'_>, guard: ResourceGuard) -> Result<()> {
+    let (window, tile, plot_id) = match guard {
+        ResourceGuard::Plot {
+            window,
+            tile,
+            instance_id,
+        } => (window, tile, instance_id),
+        ResourceGuard::Trace {
+            window,
+            tile,
+            plot_instance_id,
+            ..
+        }
+        | ResourceGuard::Annotation {
+            window,
+            tile,
+            plot_instance_id,
+            ..
+        } => (window, tile, plot_instance_id),
+    };
+    let pane = plot_pane(control, window, tile)?;
+    if pane.instance_id != plot_id {
+        return Err(Error::stale_handle("plot handle is stale"));
+    }
+    match guard {
+        ResourceGuard::Trace {
+            index,
+            trace_instance_id,
+            ..
+        } => {
+            if pane.traces.get(index).map(|trace| trace.instance_id) != Some(trace_instance_id) {
+                return Err(Error::stale_handle("trace handle is stale"));
+            }
+        }
+        ResourceGuard::Annotation { id, .. } => {
+            if pane.annotations.get(id).is_none() {
+                return Err(Error::stale_handle("annotation handle is stale"));
+            }
+        }
+        ResourceGuard::Plot { .. } => {}
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_vehicle_request(
     control: &mut AppControl<'_>,
     request: VehicleRequest,
-) -> Result<ControlResponse, String> {
-    crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)?;
+) -> Result<ControlResponse> {
+    crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)
+        .map_err(Error::internal)?;
     match request {
         VehicleRequest::List => Ok(ControlResponse::Vehicles(vehicle_infos(
             control.vehicles,
@@ -103,7 +180,8 @@ pub(crate) fn apply_vehicle_request(
         )?)),
         VehicleRequest::Add(spec) => {
             let mut vehicle = vehicle_from_spec(control.snapshot, spec)?;
-            crate::scene3d::vehicle::assign_runtime_id(&mut vehicle, control.next_vehicle_id)?;
+            crate::scene3d::vehicle::assign_runtime_id(&mut vehicle, control.next_vehicle_id)
+                .map_err(Error::internal)?;
             control.vehicles.push(vehicle);
             mark_vehicles_changed(control);
             let index = control.vehicles.len() - 1;
@@ -114,11 +192,7 @@ pub(crate) fn apply_vehicle_request(
             )?]))
         }
         VehicleRequest::Set { id, patch } => {
-            let index = control
-                .vehicles
-                .iter()
-                .position(|vehicle| vehicle.runtime.id == id)
-                .ok_or_else(|| format!("vehicle {id} is gone"))?;
+            let index = vehicle_index(control.vehicles, id)?;
             let mut updated = control.vehicles[index].clone();
             apply_vehicle_patch(control.snapshot, &mut updated, patch)?;
             let info = vehicle_info(&updated, index, control.snapshot)?;
@@ -131,16 +205,14 @@ pub(crate) fn apply_vehicle_request(
             match filter {
                 VehicleFilter::Index(index) => {
                     if index >= control.vehicles.len() {
-                        return Err(format!("vehicle index {index} is gone"));
+                        return Err(Error::stale_handle(format!(
+                            "vehicle index {index} is gone"
+                        )));
                     }
                     control.vehicles.remove(index);
                 }
                 VehicleFilter::Id(id) => {
-                    let index = control
-                        .vehicles
-                        .iter()
-                        .position(|vehicle| vehicle.runtime.id == id)
-                        .ok_or_else(|| format!("vehicle {id} is gone"))?;
+                    let index = vehicle_index(control.vehicles, id)?;
                     control.vehicles.remove(index);
                 }
                 VehicleFilter::Label(label) => {
@@ -148,6 +220,16 @@ pub(crate) fn apply_vehicle_request(
                 }
                 VehicleFilter::Source(source) => {
                     control.vehicles.retain(|vehicle| vehicle.source != source);
+                }
+                VehicleFilter::Owner(owner) => {
+                    control.vehicles.retain(|vehicle| {
+                        vehicle
+                            .runtime
+                            .owner
+                            .as_ref()
+                            .map(|candidate| candidate.name.as_str())
+                            != Some(owner.as_str())
+                    });
                 }
                 VehicleFilter::All => control.vehicles.clear(),
             }
@@ -159,6 +241,16 @@ pub(crate) fn apply_vehicle_request(
     }
 }
 
+pub(super) fn vehicle_index(
+    vehicles: &[crate::scene3d::vehicle::VehicleConfig],
+    id: u64,
+) -> Result<usize> {
+    vehicles
+        .iter()
+        .position(|vehicle| vehicle.runtime.id == id)
+        .ok_or_else(|| Error::stale_handle(format!("vehicle {id} is gone")))
+}
+
 pub(crate) fn mark_vehicles_changed(control: &mut AppControl<'_>) {
     *control.vehicle_revision = control.vehicle_revision.wrapping_add(1);
     *control.traj_dirty = true;
@@ -167,7 +259,7 @@ pub(crate) fn mark_vehicles_changed(control: &mut AppControl<'_>) {
 fn vehicle_infos(
     vehicles: &[crate::scene3d::vehicle::VehicleConfig],
     snapshot: &StoreSnapshot,
-) -> Result<Vec<VehicleInfo>, String> {
+) -> Result<Vec<VehicleInfo>> {
     vehicles
         .iter()
         .enumerate()
@@ -179,7 +271,7 @@ fn vehicle_info(
     vehicle: &crate::scene3d::vehicle::VehicleConfig,
     index: usize,
     snapshot: &StoreSnapshot,
-) -> Result<VehicleInfo, String> {
+) -> Result<VehicleInfo> {
     use crate::scene3d::vehicle::{NedReference, OriMapping, PosMapping};
 
     let position = match &vehicle.pos {
@@ -194,7 +286,7 @@ fn vehicle_info(
             down: resolved_field(snapshot, *down)?,
             reference: reference
                 .as_ref()
-                .map(|reference| -> Result<ScriptNedReference, String> {
+                .map(|reference| -> Result<ScriptNedReference> {
                     match reference {
                         NedReference::Manual(reference) => Ok(ScriptNedReference::Manual {
                             lat_deg: reference.lat_deg,
@@ -249,7 +341,9 @@ fn vehicle_info(
     let source = snapshot
         .source(vehicle.source)
         .filter(|source| !source.entry.removed)
-        .ok_or_else(|| format!("vehicle source {} is gone", vehicle.source.0))?;
+        .ok_or_else(|| {
+            Error::stale_handle(format!("vehicle source {} is gone", vehicle.source.0))
+        })?;
     Ok(VehicleInfo {
         id: vehicle.runtime.id,
         index,
@@ -276,7 +370,7 @@ fn vehicle_info(
 fn vehicle_from_spec(
     snapshot: &StoreSnapshot,
     spec: VehicleSpec,
-) -> Result<crate::scene3d::vehicle::VehicleConfig, String> {
+) -> Result<crate::scene3d::vehicle::VehicleConfig> {
     validate_source(snapshot, spec.source_id, &spec.source)?;
     validate_scale(spec.scale)?;
     Ok(crate::scene3d::vehicle::VehicleConfig {
@@ -306,7 +400,7 @@ fn apply_vehicle_patch(
     snapshot: &StoreSnapshot,
     vehicle: &mut crate::scene3d::vehicle::VehicleConfig,
     patch: VehiclePatch,
-) -> Result<(), String> {
+) -> Result<()> {
     if let Some(label) = patch.label {
         vehicle.label = label;
     }
@@ -338,10 +432,7 @@ fn apply_vehicle_patch(
     Ok(())
 }
 
-fn workspace_for<'a>(
-    control: &'a mut AppControl<'_>,
-    window: u64,
-) -> Result<&'a mut Workspace, String> {
+fn workspace_for<'a>(control: &'a mut AppControl<'_>, window: u64) -> Result<&'a mut Workspace> {
     if window == 0 {
         Ok(&mut *control.workspace)
     } else {
@@ -349,7 +440,7 @@ fn workspace_for<'a>(
             .windows
             .iter_mut()
             .find(|w| w.id.0 == window)
-            .ok_or_else(|| format!("window {window} is gone"))?
+            .ok_or_else(|| Error::stale_handle(format!("window {window} is gone")))?
             .workspace)
     }
 }
@@ -358,22 +449,26 @@ fn plot_pane<'a>(
     control: &'a mut AppControl<'_>,
     window: u64,
     tile: u64,
-) -> Result<&'a mut PlotPane, String> {
-    workspace_for(control, window)?
-        .plot_pane_mut(egui_tiles::TileId(tile))
-        .ok_or_else(|| format!("plot {tile} in window {window} is gone"))
+) -> Result<&'a mut PlotPane> {
+    plot_pane_in_workspace(workspace_for(control, window)?, window, tile)
 }
 
-fn plot_info_for(
-    workspace: &Workspace,
+fn plot_pane_in_workspace(
+    workspace: &mut Workspace,
     window: u64,
-    tile: egui_tiles::TileId,
-) -> Result<PlotInfo, String> {
+    tile: u64,
+) -> Result<&mut PlotPane> {
+    workspace
+        .plot_pane_mut(egui_tiles::TileId(tile))
+        .ok_or_else(|| Error::stale_handle(format!("plot {tile} in window {window} is gone")))
+}
+
+fn plot_info_for(workspace: &Workspace, window: u64, tile: egui_tiles::TileId) -> Result<PlotInfo> {
     workspace
         .plot_infos(window)
         .into_iter()
         .find(|info| info.tile == tile.0)
-        .ok_or_else(|| format!("plot {} in window {window} is gone", tile.0))
+        .ok_or_else(|| Error::stale_handle(format!("plot {} in window {window} is gone", tile.0)))
 }
 
 fn app_split_direction(direction: ScriptSplitDirection) -> crate::shell::workspace::SplitDirection {
@@ -386,53 +481,77 @@ fn app_split_direction(direction: ScriptSplitDirection) -> crate::shell::workspa
 fn apply_workspace_request(
     control: &mut AppControl<'_>,
     request: WorkspaceRequest,
-) -> Result<ControlResponse, String> {
+) -> Result<ControlResponse> {
     match request {
-        WorkspaceRequest::AddPlot { direction } => {
-            let target = control
-                .workspace
+        WorkspaceRequest::ListWindows => {
+            let mut windows = vec![delog_api::control::WindowInfo {
+                id: 0,
+                title: crate::shell::windows::WindowId::MAIN.title(),
+                owner: None,
+            }];
+            windows.extend(
+                control
+                    .windows
+                    .iter()
+                    .map(|window| delog_api::control::WindowInfo {
+                        id: window.id.0,
+                        title: window.title.clone(),
+                        owner: window.owner.clone(),
+                    }),
+            );
+            Ok(ControlResponse::Windows(windows))
+        }
+        WorkspaceRequest::GetState => Ok(ControlResponse::Workspace(WorkspaceInfo {
+            scene_visible: control.workspace.scene_pane_id().is_some(),
+        })),
+        WorkspaceRequest::AddPlot {
+            window,
+            direction,
+            owner,
+        } => {
+            let window = window.unwrap_or(0);
+            let workspace = workspace_for(control, window)?;
+            let target = workspace
                 .focused_plot_id()
-                .or_else(|| control.workspace.tree.root())
-                .ok_or_else(|| "the workspace has no panes to split".to_string())?;
-            let new_tile = control
-                .workspace
+                .or_else(|| workspace.tree.root())
+                .ok_or_else(|| Error::internal("the workspace has no panes to split"))?;
+            let new_tile = workspace
                 .split_plot(target, app_split_direction(direction))
-                .ok_or_else(|| "the workspace could not add a plot".to_string())?;
+                .ok_or_else(|| Error::execution("the workspace could not add a plot"))?;
+            workspace.plot_pane_mut(new_tile).expect("new plot").owner = owner;
             Ok(ControlResponse::Plots(vec![plot_info_for(
-                control.workspace,
-                0,
-                new_tile,
+                workspace, window, new_tile,
             )?]))
         }
         WorkspaceRequest::Split {
             window,
             tile,
             direction,
+            owner,
         } => {
             let workspace = workspace_for(control, window)?;
-            if workspace.plot_pane_mut(egui_tiles::TileId(tile)).is_none() {
-                return Err(format!("plot {tile} in window {window} is gone"));
-            }
+            plot_pane_in_workspace(workspace, window, tile)?;
             let new_tile = workspace
                 .split_plot(egui_tiles::TileId(tile), app_split_direction(direction))
-                .ok_or_else(|| format!("plot {tile} in window {window} could not be split"))?;
+                .ok_or_else(|| {
+                    Error::execution(format!("plot {tile} in window {window} could not be split"))
+                })?;
+            workspace.plot_pane_mut(new_tile).expect("new plot").owner = owner;
             Ok(ControlResponse::Plots(vec![plot_info_for(
                 workspace, window, new_tile,
             )?]))
         }
         WorkspaceRequest::Close { window, tile } => {
             let workspace = workspace_for(control, window)?;
-            if workspace.plot_pane_mut(egui_tiles::TileId(tile)).is_none() {
-                return Err(format!("plot {tile} in window {window} is gone"));
-            }
+            plot_pane_in_workspace(workspace, window, tile)?;
             let removed = workspace.close_plot(egui_tiles::TileId(tile));
             for field in removed {
                 control.caches.unpin(field);
             }
             Ok(ControlResponse::Unit)
         }
-        WorkspaceRequest::Equalize => {
-            control.workspace.equalize_plot_heights();
+        WorkspaceRequest::Equalize { window } => {
+            workspace_for(control, window.unwrap_or(0))?.equalize_plot_heights();
             Ok(ControlResponse::Unit)
         }
         WorkspaceRequest::ShowScene { visible } => {
@@ -441,10 +560,19 @@ fn apply_workspace_request(
             }
             Ok(ControlResponse::Unit)
         }
-        WorkspaceRequest::OpenWindow { title } => {
+        WorkspaceRequest::OpenWindow { title, owner } => {
             let id =
                 crate::shell::windows::open_window(control.windows, control.next_window_id, title);
-            Ok(ControlResponse::Window(id.0))
+            let window = control.windows.last_mut().expect("new window");
+            window.owner = owner.clone();
+            for pane in window.workspace.plot_panes_mut() {
+                pane.owner = owner.clone();
+            }
+            Ok(ControlResponse::Window(delog_api::control::WindowInfo {
+                id: id.0,
+                title: window.title.clone(),
+                owner,
+            }))
         }
     }
 }
@@ -452,8 +580,12 @@ fn apply_workspace_request(
 fn apply_playback_request(
     control: &mut AppControl<'_>,
     request: PlaybackRequest,
-) -> Result<ControlResponse, String> {
+) -> Result<ControlResponse> {
     match request {
+        PlaybackRequest::Get => Ok(ControlResponse::Playback(PlaybackInfo {
+            speed: f64::from(control.playback.speed),
+            follow_live: control.playback.follow_live,
+        })),
         PlaybackRequest::Set { speed, follow_live } => {
             if let Some(speed) = speed {
                 control.playback.set_speed(speed as f32);
@@ -466,122 +598,10 @@ fn apply_playback_request(
     }
 }
 
-fn apply_trace_request(
-    control: &mut AppControl<'_>,
-    request: TraceRequest,
-) -> Result<ControlResponse, String> {
-    match request {
-        TraceRequest::List { window, tile } => {
-            let snapshot = control.snapshot;
-            let pane = plot_pane(control, window, tile)?;
-            Ok(ControlResponse::Traces(trace_info_list(pane, snapshot)))
-        }
-        TraceRequest::Add {
-            window,
-            tile,
-            field_id,
-            field,
-            color,
-            width_px,
-            mode,
-            owner,
-        } => {
-            if !field_exists(control.snapshot, field_id) {
-                return Err(format!("field '{field}' is gone"));
-            }
-            let pane = plot_pane(control, window, tile)?;
-            let color = color.unwrap_or_else(|| {
-                delog_render::palette::trace_color(pane.traces.len()).to_srgb_f32()
-            });
-            pane.traces.push(TraceRef {
-                field: field_id,
-                color,
-                width_px: width_px.unwrap_or(1.5),
-                mode: plot_trace_mode(mode),
-                visible: true,
-                label_override: None,
-                owner,
-            });
-            Ok(ControlResponse::Unit)
-        }
-        TraceRequest::Remove {
-            window,
-            tile,
-            index,
-            field_id,
-            field: _,
-        } => {
-            let pane = plot_pane(control, window, tile)?;
-            let removed = match (index, field_id) {
-                (Some(index), _) => {
-                    if index >= pane.traces.len() {
-                        return Err(format!(
-                            "trace {index} on plot {tile} in window {window} is gone"
-                        ));
-                    }
-                    Some(pane.traces.remove(index).field)
-                }
-                (None, Some(field_id)) => {
-                    let existed = pane.traces.iter().any(|trace| trace.field == field_id);
-                    pane.traces.retain(|trace| trace.field != field_id);
-                    existed.then_some(field_id)
-                }
-                (None, None) => None,
-            };
-            if let Some(field) = removed {
-                control.caches.unpin(field);
-            }
-            Ok(ControlResponse::Unit)
-        }
-        TraceRequest::Clear { window, tile } => {
-            let pane = plot_pane(control, window, tile)?;
-            let removed: Vec<FieldId> = pane.traces.iter().map(|trace| trace.field).collect();
-            pane.traces.clear();
-            for field in removed {
-                control.caches.unpin(field);
-            }
-            Ok(ControlResponse::Unit)
-        }
-        TraceRequest::Set {
-            window,
-            tile,
-            index,
-            field_id,
-            color,
-            width_px,
-            mode,
-            visible,
-        } => {
-            let pane = plot_pane(control, window, tile)?;
-            let trace = pane.traces.get_mut(index).ok_or_else(|| {
-                format!("trace {index} on plot {tile} in window {window} is gone")
-            })?;
-            if trace.field != field_id {
-                return Err(format!(
-                    "trace {index} on plot {tile} in window {window} no longer refers to the field this handle was created for"
-                ));
-            }
-            if let Some(color) = color {
-                trace.color = color;
-            }
-            if let Some(width_px) = width_px {
-                trace.width_px = width_px;
-            }
-            if let Some(mode) = mode {
-                trace.mode = plot_trace_mode(mode);
-            }
-            if let Some(visible) = visible {
-                trace.visible = visible;
-            }
-            Ok(ControlResponse::Unit)
-        }
-    }
-}
-
 fn apply_annotation_request(
     control: &mut AppControl<'_>,
     request: AnnotationRequest,
-) -> Result<ControlResponse, String> {
+) -> Result<ControlResponse> {
     match request {
         AnnotationRequest::Add {
             window,
@@ -604,8 +624,9 @@ fn apply_annotation_request(
                 .expect("the annotation was just inserted");
             annotation.label = label;
             annotation.apply_style_patch(style);
-            annotation.owner = owner.map(Into::into);
+            annotation.owner = owner;
             let info = AnnotationInfo {
+                plot_instance_id: pane.instance_id,
                 window,
                 tile,
                 id,
@@ -636,9 +657,9 @@ fn apply_annotation_request(
                 }
                 None => {
                     if matches!(filter, AnnotationFilter::Index(_) | AnnotationFilter::Id(_)) {
-                        return Err(
-                            "a global annotation removal cannot address a single annotation by index or id".into(),
-                        );
+                        return Err(Error::invalid_input(
+                            "a global annotation removal cannot address a single annotation by index or id",
+                        ));
                     }
                     for pane in control.workspace.plot_panes_mut() {
                         remove_matching_annotations(pane, &filter)?;
@@ -662,7 +683,9 @@ fn apply_annotation_request(
         } => {
             let pane = plot_pane(control, window, tile)?;
             let annotation = pane.annotations.get_mut(id).ok_or_else(|| {
-                format!("annotation {id} on plot {tile} in window {window} is gone")
+                Error::stale_handle(format!(
+                    "annotation {id} on plot {tile} in window {window} is gone"
+                ))
             })?;
             if let Some(label) = label {
                 annotation.label = label;
@@ -676,10 +699,7 @@ fn apply_annotation_request(
     }
 }
 
-fn remove_matching_annotations(
-    pane: &mut PlotPane,
-    filter: &AnnotationFilter,
-) -> Result<(), String> {
+fn remove_matching_annotations(pane: &mut PlotPane, filter: &AnnotationFilter) -> Result<()> {
     match filter {
         AnnotationFilter::All => {
             pane.annotations.clear();
@@ -691,13 +711,13 @@ fn remove_matching_annotations(
                 .items()
                 .get(*index)
                 .map(|annotation| annotation.id)
-                .ok_or_else(|| format!("annotation {index} is gone"))?;
+                .ok_or_else(|| Error::stale_handle(format!("annotation {index} is gone")))?;
             pane.annotations.remove(id);
             Ok(())
         }
         AnnotationFilter::Id(id) => {
             if pane.annotations.get(*id).is_none() {
-                return Err(format!("annotation {id} is gone"));
+                return Err(Error::stale_handle(format!("annotation {id} is gone")));
             }
             pane.annotations.remove(*id);
             Ok(())
@@ -721,50 +741,24 @@ fn remove_matching_annotations(
     }
 }
 
-fn field_exists(snapshot: &StoreSnapshot, field_id: FieldId) -> bool {
-    snapshot
-        .fields
-        .get(field_id.index())
-        .is_some_and(|field| field.id == field_id && !field.removed)
-}
-
-fn trace_info_list(pane: &PlotPane, snapshot: &StoreSnapshot) -> Vec<TraceInfo> {
-    pane.traces
-        .iter()
-        .enumerate()
-        .map(|(index, trace)| TraceInfo {
-            index,
-            field_id: trace.field,
-            field: trace_label(snapshot, trace.field),
-            color: trace.color,
-            width_px: trace.width_px,
-            mode: script_trace_mode(trace.mode),
-            visible: trace.visible,
-        })
-        .collect()
-}
-
-fn script_trace_mode(mode: PlotTraceMode) -> ScriptTraceMode {
-    match mode {
-        PlotTraceMode::Line => ScriptTraceMode::Line,
-        PlotTraceMode::Scatter => ScriptTraceMode::Scatter,
-        PlotTraceMode::Step => ScriptTraceMode::Step,
-    }
-}
-
-fn plot_trace_mode(mode: ScriptTraceMode) -> PlotTraceMode {
-    match mode {
-        ScriptTraceMode::Line => PlotTraceMode::Line,
-        ScriptTraceMode::Scatter => PlotTraceMode::Scatter,
-        ScriptTraceMode::Step => PlotTraceMode::Step,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::plotting::plot::TraceMode as PlotTraceMode;
+    use delog_api::ErrorKind;
+    use delog_api::control::TraceMode as ScriptTraceMode;
+
+    trait ErrorContains {
+        fn contains(&self, text: &str) -> bool;
+    }
+
+    impl ErrorContains for delog_api::Error {
+        fn contains(&self, text: &str) -> bool {
+            self.to_string().contains(text)
+        }
+    }
     use delog_api::control::{
         AnnotationGeometry, AnnotationKind, AnnotationStylePatch, GenerationRequest, LayoutRequest,
         MarkerPatch, MarkerRequest, ProfilePosition, ResolvedVehicleField, ScriptOwner,
@@ -978,7 +972,7 @@ mod tests {
             }
         }
 
-        fn apply(&mut self, request: VehicleRequest) -> Result<ControlResponse, String> {
+        fn apply(&mut self, request: VehicleRequest) -> Result<ControlResponse> {
             let mut control = AppControl {
                 markers: &mut self.markers,
                 workspace: &mut self.workspace,
@@ -993,10 +987,10 @@ mod tests {
                 traj_dirty: &mut self.traj_dirty,
                 vehicle_profiles: self.vehicle_profiles,
             };
-            super::apply(&mut control, ControlRequest::Vehicles(request))
+            super::apply(&mut control, ControlRequest::Vehicles(Box::new(request)))
         }
 
-        fn apply_control(&mut self, request: ControlRequest) -> Result<ControlResponse, String> {
+        fn apply_control(&mut self, request: ControlRequest) -> Result<ControlResponse> {
             let mut control = AppControl {
                 markers: &mut self.markers,
                 workspace: &mut self.workspace,
@@ -1014,10 +1008,7 @@ mod tests {
             super::apply(&mut control, request)
         }
 
-        fn apply_profile(
-            &mut self,
-            request: VehicleProfileRequest,
-        ) -> Result<ControlResponse, String> {
+        fn apply_profile(&mut self, request: VehicleProfileRequest) -> Result<ControlResponse> {
             let mut control = AppControl {
                 markers: &mut self.markers,
                 workspace: &mut self.workspace,
@@ -1035,10 +1026,12 @@ mod tests {
             super::apply(&mut control, ControlRequest::VehicleProfiles(request))
         }
 
-        fn add(&mut self, spec: VehicleSpec) -> Result<VehicleInfo, String> {
+        fn add(&mut self, spec: VehicleSpec) -> Result<VehicleInfo> {
             match self.apply(VehicleRequest::Add(spec))? {
                 ControlResponse::Vehicles(mut infos) if infos.len() == 1 => Ok(infos.remove(0)),
-                response => Err(format!("unexpected response: {response:?}")),
+                response => Err(Error::internal(format!(
+                    "unexpected response: {response:?}"
+                ))),
             }
         }
 
@@ -1127,6 +1120,75 @@ mod tests {
         assert_eq!(harness.playback.speed, 2.0);
         assert!(harness.playback.follow_live);
         assert_eq!(harness.markers.as_slice()[0].label, "armed");
+    }
+
+    #[test]
+    fn stale_plot_and_invalid_playback_keep_distinct_error_kinds() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let stale = harness
+            .apply_control(ControlRequest::Traces(TraceRequest::List {
+                window: 0,
+                tile: u64::MAX,
+            }))
+            .unwrap_err();
+        assert_eq!(stale.kind(), ErrorKind::StaleHandle);
+
+        let before = harness.playback;
+        let invalid = harness
+            .apply_control(ControlRequest::Playback(PlaybackRequest::Set {
+                speed: Some(f64::NAN),
+                follow_live: Some(true),
+            }))
+            .unwrap_err();
+        assert_eq!(invalid.kind(), ErrorKind::InvalidInput);
+        assert_eq!(harness.playback, before);
+    }
+
+    #[test]
+    fn listing_a_missing_window_reports_a_stale_handle() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let error = harness
+            .apply_control(ControlRequest::Plots(PlotRequest::List {
+                window: Some(u64::MAX),
+            }))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::StaleHandle);
+    }
+
+    #[test]
+    fn stale_vehicle_in_batch_preserves_kind_and_rolls_back() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let before = harness.playback;
+        let error = harness
+            .apply_control(ControlRequest::Batch(vec![
+                ControlRequest::Playback(PlaybackRequest::Set {
+                    speed: Some(4.0),
+                    follow_live: Some(true),
+                }),
+                ControlRequest::Vehicles(Box::new(VehicleRequest::Set {
+                    id: u64::MAX,
+                    patch: VehiclePatch {
+                        label: Some("gone".into()),
+                        ..VehiclePatch::default()
+                    },
+                })),
+            ]))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::StaleHandle);
+        assert!(error.to_string().starts_with("batch request 1:"), "{error}");
+        assert_eq!(harness.playback, before);
+    }
+
+    #[test]
+    fn replaced_field_path_is_a_stale_handle() {
+        let mut harness = VehicleHarness::new(vehicle_snapshot_for(&["flight"]));
+        let mut spec = harness.gps_spec("flight", "Vehicle");
+        if let VehiclePosition::Gps { lat, .. } = &mut spec.position {
+            lat.path = "flight/GPS/replaced".into();
+        }
+        let error = harness.apply(VehicleRequest::Add(spec)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::StaleHandle);
+        assert!(harness.vehicles.is_empty());
     }
 
     #[test]
@@ -1349,13 +1411,148 @@ mod tests {
             ControlResponse::Unit
         );
         assert!(harness.windows.is_empty());
-        assert_eq!(harness.next_window_id, 1);
+        assert_eq!(harness.next_window_id, 5);
         assert_eq!(harness.playback.speed, 1.0);
         assert!(!harness.playback.follow_live);
         assert!(harness.markers.as_slice().is_empty());
         assert_eq!(harness.next_vehicle_id, 17);
         let new_marker = harness.markers.add_at(20);
         assert!(new_marker > old_marker);
+    }
+
+    #[test]
+    fn window_ids_do_not_retarget_after_layout_clear_or_apply() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let ControlResponse::Window(old) = harness
+            .apply_control(ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                title: None,
+                owner: None,
+            }))
+            .unwrap()
+        else {
+            panic!("expected window")
+        };
+
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Clear))
+            .unwrap();
+        let old_error = harness
+            .apply_control(ControlRequest::Plots(PlotRequest::List {
+                window: Some(old.id),
+            }))
+            .unwrap_err();
+        assert_eq!(old_error.kind(), ErrorKind::StaleHandle);
+        let ControlResponse::Layout(empty_layout) = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Current))
+            .unwrap()
+        else {
+            panic!("expected layout")
+        };
+
+        let ControlResponse::Window(replacement) = harness
+            .apply_control(ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                title: None,
+                owner: None,
+            }))
+            .unwrap()
+        else {
+            panic!("expected window")
+        };
+        assert_ne!(replacement.id, old.id);
+
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Apply {
+                json: empty_layout,
+            }))
+            .unwrap();
+        let ControlResponse::Window(after_apply) = harness
+            .apply_control(ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                title: None,
+                owner: None,
+            }))
+            .unwrap()
+        else {
+            panic!("expected window")
+        };
+        assert_ne!(after_apply.id, old.id);
+        assert_ne!(after_apply.id, replacement.id);
+        for stale_id in [old.id, replacement.id] {
+            let error = harness
+                .apply_control(ControlRequest::Plots(PlotRequest::List {
+                    window: Some(stale_id),
+                }))
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::StaleHandle);
+        }
+    }
+
+    #[test]
+    fn restored_windows_receive_fresh_ids_instead_of_retargeting_stale_handles() {
+        let mut harness = VehicleHarness::new(StoreSnapshot::empty());
+        let mut stale_ids = Vec::new();
+        for title in ["First", "Second"] {
+            let ControlResponse::Window(info) = harness
+                .apply_control(ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                    title: Some(title.into()),
+                    owner: None,
+                }))
+                .unwrap()
+            else {
+                panic!("expected window")
+            };
+            stale_ids.push(info.id);
+        }
+        let ControlResponse::Layout(saved) = harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Current))
+            .unwrap()
+        else {
+            panic!("expected saved layout")
+        };
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Clear))
+            .unwrap();
+        harness
+            .apply_control(ControlRequest::Layouts(LayoutRequest::Apply {
+                json: saved,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            harness.workspace.tree.id(),
+            egui::Id::new(("plot_workspace", crate::shell::windows::WindowId::MAIN.0))
+        );
+        assert_eq!(harness.windows.len(), 2);
+        let restored_ids = harness
+            .windows
+            .iter()
+            .map(|window| window.id.0)
+            .collect::<Vec<_>>();
+        assert!(restored_ids.iter().all(|id| *id > stale_ids[1]));
+        assert!(restored_ids[0] < restored_ids[1]);
+        assert!(harness.next_window_id > *restored_ids.iter().max().unwrap());
+        assert_eq!(
+            harness
+                .windows
+                .iter()
+                .map(|window| window.title.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+        for window in &harness.windows {
+            assert_eq!(
+                window.workspace.tree.id(),
+                egui::Id::new(("plot_workspace", window.id.0))
+            );
+            assert_eq!(window.workspace.plot_infos(window.id.0).len(), 1);
+        }
+        for stale_id in stale_ids {
+            let error = harness
+                .apply_control(ControlRequest::Plots(PlotRequest::List {
+                    window: Some(stale_id),
+                }))
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::StaleHandle);
+        }
     }
 
     #[test]
@@ -1882,11 +2079,21 @@ mod tests {
         mode: ScriptTraceMode,
         owner: Option<ScriptOwner>,
     ) -> ControlRequest {
+        add_request_with_path(tile, field_id, "IMU.AccX", mode, owner)
+    }
+
+    fn add_request_with_path(
+        tile: u64,
+        field_id: FieldId,
+        path: &str,
+        mode: ScriptTraceMode,
+        owner: Option<ScriptOwner>,
+    ) -> ControlRequest {
         ControlRequest::Traces(TraceRequest::Add {
             window: 0,
             tile,
             field_id,
-            field: "IMU.AccX".into(),
+            field: path.into(),
             color: None,
             width_px: None,
             mode,
@@ -1930,6 +2137,41 @@ mod tests {
         assert_eq!(pane.traces[0].field, field);
         assert_eq!(pane.traces[0].mode, PlotTraceMode::Step);
         assert_eq!(pane.traces[0].owner, owner);
+    }
+
+    #[test]
+    fn trace_add_rejects_a_field_id_with_the_wrong_path() {
+        let (snapshot, field_id) = snapshot_with_field("flight", "IMU", "AccX");
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let mut request = add_request(tile, field_id, ScriptTraceMode::Line, None);
+        if let ControlRequest::Traces(TraceRequest::Add { field, .. }) = &mut request {
+            *field = "IMU.Gyro".into();
+        }
+        let error = apply(&mut control, request).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::StaleHandle);
+        assert!(
+            control
+                .workspace
+                .plot_pane_mut(egui_tiles::TileId(tile))
+                .unwrap()
+                .traces
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2095,6 +2337,58 @@ mod tests {
     }
 
     #[test]
+    fn trace_remove_rejects_wrong_or_missing_field_identity_without_unpinning() {
+        let (snapshot, field_id) = snapshot_with_field("flight", "IMU", "AccX");
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1;
+        let mut caches = CacheManager::new();
+        let tile = root_tile(&workspace);
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        apply(
+            &mut control,
+            add_request(tile, field_id, ScriptTraceMode::Line, None),
+        )
+        .unwrap();
+        pin(control.caches, field_id);
+
+        for (requested_id, path) in [(field_id, "IMU.Gyro"), (FieldId(u32::MAX), "IMU.AccX")] {
+            let error = apply(
+                &mut control,
+                ControlRequest::Traces(TraceRequest::Remove {
+                    window: 0,
+                    tile,
+                    index: None,
+                    field_id: Some(requested_id),
+                    field: Some(path.into()),
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::StaleHandle);
+            assert_eq!(
+                control
+                    .workspace
+                    .plot_pane_mut(egui_tiles::TileId(tile))
+                    .unwrap()
+                    .traces[0]
+                    .field,
+                field_id
+            );
+            assert!(control.caches.is_pinned(field_id));
+        }
+    }
+
+    #[test]
     fn remove_by_index_out_of_range_is_rejected() {
         let snapshot = StoreSnapshot::empty();
         let mut markers = Markers::new();
@@ -2200,7 +2494,7 @@ mod tests {
         .unwrap();
         apply(
             &mut control,
-            add_request(tile, field_b, ScriptTraceMode::Line, None),
+            add_request_with_path(tile, field_b, "IMU.Gyro", ScriptTraceMode::Line, None),
         )
         .unwrap();
         apply(
@@ -2273,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn add_plot_splits_the_root_and_reports_the_new_planes_info() {
+    fn add_plot_reports_the_new_panes_owner() {
         let snapshot = StoreSnapshot::empty();
         let mut markers = Markers::new();
         let mut workspace = crate::shell::workspace::Workspace::new();
@@ -2290,9 +2584,15 @@ mod tests {
             &mut caches,
             &snapshot,
         );
+        let owner = Some(ScriptOwner {
+            name: "external".into(),
+            generation: 7,
+        });
         let response = apply(
             &mut control,
             ControlRequest::Workspace(WorkspaceRequest::AddPlot {
+                window: None,
+                owner: owner.clone(),
                 direction: ScriptSplitDirection::Horizontal,
             }),
         )
@@ -2301,7 +2601,80 @@ mod tests {
             panic!("expected Plots response");
         };
         assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].owner, owner);
+        assert_eq!(control.workspace.plot_infos(0)[1].owner, owner);
         assert_eq!(control.workspace.plot_infos(0).len(), 2);
+    }
+
+    #[test]
+    fn add_plot_and_equalize_target_the_requested_window() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows: Vec<crate::shell::windows::ExtendedWindow> = Vec::new();
+        let mut playback = Playback::default();
+        let mut next_window_id = 1u64;
+        let mut caches = CacheManager::new();
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        let window = apply(
+            &mut control,
+            ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                owner: None,
+                title: Some("Second".into()),
+            }),
+        )
+        .unwrap()
+        .into_window_info()
+        .unwrap()
+        .id;
+        let main_before = control.workspace.plot_infos(0).len();
+        let second_before = control.windows[0].workspace.plot_infos(window).len();
+        let response = apply(
+            &mut control,
+            ControlRequest::Workspace(WorkspaceRequest::AddPlot {
+                window: Some(window),
+                owner: None,
+                direction: ScriptSplitDirection::Vertical,
+            }),
+        )
+        .unwrap();
+        let ControlResponse::Plots(infos) = response else {
+            panic!("expected Plots response");
+        };
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].window, window);
+        assert_eq!(control.workspace.plot_infos(0).len(), main_before);
+        let second = control.windows[0].workspace.plot_infos(window);
+        assert_eq!(second.len(), second_before + 1);
+        assert!(second.iter().any(|info| info.tile == infos[0].tile));
+        assert_eq!(
+            apply(
+                &mut control,
+                ControlRequest::Workspace(WorkspaceRequest::Equalize {
+                    window: Some(window)
+                }),
+            )
+            .unwrap(),
+            ControlResponse::Unit
+        );
+        let missing = apply(
+            &mut control,
+            ControlRequest::Workspace(WorkspaceRequest::AddPlot {
+                window: Some(window + 40),
+                owner: None,
+                direction: ScriptSplitDirection::Vertical,
+            }),
+        )
+        .unwrap_err();
+        assert!(missing.contains("gone"), "{missing}");
     }
 
     #[test]
@@ -2326,6 +2699,7 @@ mod tests {
         let response = apply(
             &mut control,
             ControlRequest::Workspace(WorkspaceRequest::Split {
+                owner: None,
                 window: 0,
                 tile,
                 direction: ScriptSplitDirection::Vertical,
@@ -2361,6 +2735,7 @@ mod tests {
         let error = apply(
             &mut control,
             ControlRequest::Workspace(WorkspaceRequest::Split {
+                owner: None,
                 window: 0,
                 tile: 999,
                 direction: ScriptSplitDirection::Vertical,
@@ -2392,6 +2767,7 @@ mod tests {
         apply(
             &mut control,
             ControlRequest::Workspace(WorkspaceRequest::Split {
+                owner: None,
                 window: 0,
                 tile,
                 direction: ScriptSplitDirection::Vertical,
@@ -2427,7 +2803,7 @@ mod tests {
         );
         let response = apply(
             &mut control,
-            ControlRequest::Workspace(WorkspaceRequest::Equalize),
+            ControlRequest::Workspace(WorkspaceRequest::Equalize { window: None }),
         )
         .unwrap();
         assert_eq!(response, ControlResponse::Unit);
@@ -2462,7 +2838,7 @@ mod tests {
     }
 
     #[test]
-    fn open_window_creates_a_new_window_and_returns_its_id() {
+    fn open_window_returns_its_info_and_stamps_its_initial_plot() {
         let snapshot = StoreSnapshot::empty();
         let mut markers = Markers::new();
         let mut workspace = crate::shell::workspace::Workspace::new();
@@ -2485,17 +2861,27 @@ mod tests {
             traj_dirty,
             vehicle_profiles: None,
         };
+        let owner = Some(ScriptOwner {
+            name: "external".into(),
+            generation: 7,
+        });
         let response = apply(
             &mut control,
             ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                owner: owner.clone(),
                 title: Some("Compare".into()),
             }),
         )
         .unwrap();
-        assert_eq!(response, ControlResponse::Window(1));
+        let info = response.into_window_info().unwrap();
+        assert_eq!(info.id, 1);
+        assert_eq!(info.title, "Compare");
+        assert_eq!(info.owner, owner);
         assert_eq!(control.windows.len(), 1);
         assert_eq!(control.windows[0].id.0, 1);
         assert_eq!(control.windows[0].title, "Compare");
+        assert_eq!(control.windows[0].owner, owner);
+        assert_eq!(control.windows[0].workspace.plot_infos(1)[0].owner, owner);
         assert_eq!(*control.next_window_id, 2);
     }
 
@@ -2543,6 +2929,62 @@ mod tests {
         .unwrap();
         assert_eq!(control.playback.speed, 2.0);
         assert!(control.playback.follow_live);
+    }
+
+    #[test]
+    fn native_state_queries_include_empty_windows_scene_and_playback() {
+        let snapshot = StoreSnapshot::empty();
+        let mut markers = Markers::new();
+        let mut workspace = crate::shell::workspace::Workspace::new();
+        let mut windows = vec![crate::shell::windows::ExtendedWindow::new(
+            crate::shell::windows::WindowId(7),
+        )];
+        let mut playback = Playback::default();
+        playback.set_speed(2.0);
+        playback.follow_live = true;
+        let mut next_window_id = 8;
+        let mut caches = CacheManager::new();
+        let mut control = control_with_one_plot(
+            &mut markers,
+            &mut workspace,
+            &mut windows,
+            &mut playback,
+            &mut next_window_id,
+            &mut caches,
+            &snapshot,
+        );
+        apply(
+            &mut control,
+            ControlRequest::Workspace(WorkspaceRequest::ShowScene { visible: true }),
+        )
+        .unwrap();
+        let windows = apply(
+            &mut control,
+            ControlRequest::Workspace(WorkspaceRequest::ListWindows),
+        )
+        .unwrap()
+        .into_windows()
+        .unwrap();
+        assert_eq!(
+            windows.iter().map(|window| window.id).collect::<Vec<_>>(),
+            [0, 7]
+        );
+        assert!(
+            apply(
+                &mut control,
+                ControlRequest::Workspace(WorkspaceRequest::GetState)
+            )
+            .unwrap()
+            .into_workspace()
+            .unwrap()
+            .scene_visible
+        );
+        let playback = apply(&mut control, ControlRequest::Playback(PlaybackRequest::Get))
+            .unwrap()
+            .into_playback()
+            .unwrap();
+        assert_eq!(playback.speed, 2.0);
+        assert!(playback.follow_live);
     }
 
     fn pin(caches: &mut CacheManager, field: FieldId) {
@@ -2725,7 +3167,7 @@ mod tests {
         .unwrap();
         apply(
             &mut control,
-            add_request(tile, field_b, ScriptTraceMode::Line, None),
+            add_request_with_path(tile, field_b, "IMU.Gyro", ScriptTraceMode::Line, None),
         )
         .unwrap();
         pin(control.caches, field_a);
@@ -2890,10 +3332,7 @@ mod tests {
             .workspace
             .plot_pane_mut(egui_tiles::TileId(tile))
             .unwrap();
-        assert_eq!(
-            pane.annotations.get(id).unwrap().owner,
-            owner.map(Into::into)
-        );
+        assert_eq!(pane.annotations.get(id).unwrap().owner, owner);
     }
 
     #[test]

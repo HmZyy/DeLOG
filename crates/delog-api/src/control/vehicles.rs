@@ -1,6 +1,6 @@
 use delog_core::identity::{FieldId, SourceId};
 
-use super::ScriptOwner;
+use super::ResourceOwner;
 use crate::catalog::FieldMatch;
 use crate::{Error, Result};
 
@@ -8,6 +8,17 @@ use crate::{Error, Result};
 pub struct ResolvedVehicleField {
     pub id: FieldId,
     pub path: String,
+}
+
+impl ResolvedVehicleField {
+    pub fn validate(&self) -> Result<()> {
+        let Self { id: _, path } = self;
+        if path.is_empty() {
+            Err(Error::invalid_input("vehicle field path must not be empty"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl From<FieldMatch> for ResolvedVehicleField {
@@ -69,7 +80,11 @@ impl VehicleNedReference {
                 lon_deg,
                 alt_m,
             } => Self::manual(*lat_deg, *lon_deg, *alt_m).map(|_| ()),
-            Self::Fields { .. } => Ok(()),
+            Self::Fields { lat, lon, alt } => {
+                lat.validate()?;
+                lon.validate()?;
+                alt.validate()
+            }
         }
     }
 }
@@ -131,13 +146,33 @@ impl VehiclePosition {
 
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Ned { reference, .. } => {
+            Self::Ned {
+                north,
+                east,
+                down,
+                reference,
+            } => {
+                north.validate()?;
+                east.validate()?;
+                down.validate()?;
                 if let Some(reference) = reference {
                     reference.validate()?;
                 }
                 Ok(())
             }
-            Self::Gps { alt_offset_m, .. } => validate_f64(*alt_offset_m, "alt_offset_m"),
+            Self::Gps {
+                lat,
+                lon,
+                alt,
+                lat_lon_dege7: _,
+                alt_mm: _,
+                alt_offset_m,
+            } => {
+                lat.validate()?;
+                lon.validate()?;
+                alt.validate()?;
+                validate_f64(*alt_offset_m, "alt_offset_m")
+            }
         }
     }
 }
@@ -160,6 +195,28 @@ pub enum VehicleOrientation {
 }
 
 impl VehicleOrientation {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Static => Ok(()),
+            Self::Euler {
+                roll,
+                pitch,
+                yaw,
+                degrees: _,
+            } => {
+                roll.validate()?;
+                pitch.validate()?;
+                yaw.validate()
+            }
+            Self::Quat { w, x, y, z } => {
+                w.validate()?;
+                x.validate()?;
+                y.validate()?;
+                z.validate()
+            }
+        }
+    }
+
     pub fn static_orientation() -> Self {
         Self::Static
     }
@@ -244,15 +301,36 @@ pub struct VehicleSpec {
     pub color: [f32; 4],
     pub path_color: [f32; 4],
     pub scale: f32,
-    pub owner: Option<ScriptOwner>,
+    pub owner: Option<ResourceOwner>,
 }
 
 impl VehicleSpec {
     pub fn validate(&self) -> Result<()> {
-        self.position.validate()?;
-        validate_color(self.color, "vehicle color")?;
-        validate_color(self.path_color, "vehicle path color")?;
-        validate_scale(self.scale)
+        let Self {
+            source_id: _,
+            source,
+            label,
+            show: _,
+            show_path: _,
+            position,
+            orientation,
+            model,
+            color,
+            path_color,
+            scale,
+            owner,
+        } = self;
+        validate_nonempty(source, "vehicle source")?;
+        validate_nonempty(label, "vehicle label")?;
+        position.validate()?;
+        orientation.validate()?;
+        validate_model(model)?;
+        if let Some(owner) = owner {
+            owner.validate()?;
+        }
+        validate_color(*color, "vehicle color")?;
+        validate_color(*path_color, "vehicle path color")?;
+        validate_scale(*scale)
     }
 
     pub fn apply_patch(&mut self, patch: VehiclePatch) -> Result<()> {
@@ -303,18 +381,54 @@ pub struct VehiclePatch {
 
 impl VehiclePatch {
     pub fn validate(&self) -> Result<()> {
-        if let Some(position) = &self.position {
+        let Self {
+            label,
+            show: _,
+            show_path: _,
+            position,
+            orientation,
+            model,
+            color,
+            path_color,
+            scale,
+        } = self;
+        if let Some(label) = label {
+            validate_nonempty(label, "vehicle label")?;
+        }
+        if let Some(position) = position {
             position.validate()?;
         }
-        if let Some(color) = self.color {
-            validate_color(color, "vehicle color")?;
+        if let Some(orientation) = orientation {
+            orientation.validate()?;
         }
-        if let Some(path_color) = self.path_color {
-            validate_color(path_color, "vehicle path color")?;
+        if let Some(model) = model {
+            validate_model(model)?;
         }
-        if let Some(scale) = self.scale {
-            validate_scale(scale)?;
+        if let Some(color) = color {
+            validate_color(*color, "vehicle color")?;
         }
+        if let Some(path_color) = path_color {
+            validate_color(*path_color, "vehicle path color")?;
+        }
+        if let Some(scale) = scale {
+            validate_scale(*scale)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_nonempty(value: &str, name: &str) -> Result<()> {
+    if value.is_empty() {
+        Err(Error::invalid_input(format!("{name} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_model(model: &VehicleModel) -> Result<()> {
+    if let VehicleModel::CustomGlb(path) = model {
+        VehicleModel::parse(path).map(|_| ())
+    } else {
         Ok(())
     }
 }
@@ -361,6 +475,7 @@ pub enum VehicleFilter {
     Index(usize),
     Label(String),
     Source(SourceId),
+    Owner(String),
     All,
 }
 
@@ -370,6 +485,24 @@ pub enum VehicleRequest {
     Add(VehicleSpec),
     Set { id: u64, patch: VehiclePatch },
     Remove(VehicleFilter),
+}
+
+impl VehicleRequest {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::List => Ok(()),
+            Self::Add(spec) => spec.validate(),
+            Self::Set { id: _, patch } => patch.validate(),
+            Self::Remove(filter) => match filter {
+                VehicleFilter::Label(label) => validate_nonempty(label, "vehicle label"),
+                VehicleFilter::Owner(owner) => validate_nonempty(owner, "vehicle owner"),
+                VehicleFilter::Id(_)
+                | VehicleFilter::Index(_)
+                | VehicleFilter::Source(_)
+                | VehicleFilter::All => Ok(()),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -483,11 +616,38 @@ pub enum VehicleProfileRequest {
         name: String,
         source_id: SourceId,
         source: String,
-        owner: Option<ScriptOwner>,
+        owner: Option<ResourceOwner>,
     },
     Delete {
         name: String,
     },
+}
+
+impl VehicleProfileRequest {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::List => Ok(()),
+            Self::Save {
+                name,
+                vehicle_id: _,
+            }
+            | Self::Load { name }
+            | Self::Delete { name } => validate_profile_name(name).map(|_| ()),
+            Self::Apply {
+                name,
+                source_id: _,
+                source,
+                owner,
+            } => {
+                validate_profile_name(name)?;
+                validate_nonempty(source, "vehicle profile source")?;
+                if let Some(owner) = owner {
+                    owner.validate()?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 pub fn validate_profile_name(name: &str) -> Result<String> {

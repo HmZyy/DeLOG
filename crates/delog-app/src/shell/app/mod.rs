@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 pub mod command_palette;
 pub mod commands;
 pub mod context_header;
-#[cfg(feature = "scripting")]
 mod control_ownership;
-#[cfg(feature = "scripting")]
+mod control_policy;
+mod control_queue;
 mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
@@ -414,6 +414,9 @@ enum LayoutManagerAction {
 
 pub struct DelogApp {
     session: Session,
+    #[expect(dead_code, reason = "retained for external API integration")]
+    control_host: Arc<control_queue::AppControlHost>,
+    control_queue: control_queue::ControlQueue,
     #[cfg(feature = "scripting")]
     scripts: scripts::ScriptsPanel,
     gpu: GpuBridge,
@@ -577,11 +580,15 @@ impl DelogApp {
         let (exported_profiling_tx, exported_profiling) = mpsc::channel();
         let (data_export_tx, data_export_rx) = mpsc::channel();
         let (image_export_writes_tx, image_export_writes) = mpsc::channel();
+        let (control_host, control_queue) =
+            control_queue::AppControlHost::new(cc.egui_ctx.clone(), 128);
         let session = Session::new(cc.egui_ctx.clone());
         // Shared metrics registry so cache metrics land in the same dock.
         let caches = CacheManager::new().with_metrics(std::sync::Arc::clone(session.metrics()));
         Self {
             session,
+            control_host: Arc::clone(&control_host),
+            control_queue,
             #[cfg(feature = "scripting")]
             scripts: {
                 let config_dir = crate::config::layout::doc::config_dir()
@@ -590,7 +597,7 @@ impl DelogApp {
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
                     config_dir.join("script_params.json"),
-                    cc.egui_ctx.clone(),
+                    control_host,
                 )
             },
             gpu: GpuBridge::from_creation_context(cc),
@@ -1281,7 +1288,6 @@ impl DelogApp {
         self.vehicle_trajectories.clear();
     }
 
-    #[cfg(feature = "scripting")]
     fn apply_layout_control_effects(&mut self, effects: control_service::LayoutControlEffects) {
         if effects.interrupt_layout {
             self.sequences.interrupt_layout();
@@ -2347,10 +2353,16 @@ impl DelogApp {
         }
     }
 
-    fn apply_layout(&mut self, layout: LayoutApply) {
+    fn apply_layout(&mut self, mut layout: LayoutApply) {
+        if let Err(error) = crate::shell::windows::install_restored_windows(
+            &mut self.windows,
+            &mut self.next_window_id,
+            std::mem::take(&mut layout.windows),
+        ) {
+            self.push_log(crate::ui::logging::log(LogLevel::Error, error));
+            return;
+        }
         self.workspace = layout.workspace;
-        self.windows = layout.windows;
-        self.next_window_id = crate::shell::windows::next_window_id(&self.windows);
         self.view = None;
         self.view_fitted = false;
         self.fit_view_all = layout.fit_all;
@@ -3650,34 +3662,39 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
                 self.settings.scripting.use_original_timestamps,
             );
-            let vehicle_profiles =
-                crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
-            let mut layout_effects = control_service::LayoutControlEffects::default();
-            if let Some(queue) = self.scripts.control_queue() {
-                let mut control = control_service::AppControl {
-                    markers: &mut self.markers,
-                    workspace: &mut self.workspace,
-                    windows: &mut self.windows,
-                    playback: &mut self.playback,
-                    next_window_id: &mut self.next_window_id,
-                    caches: &mut self.caches,
-                    snapshot: &snapshot,
-                    vehicles: &mut self.vehicles,
-                    next_vehicle_id: &mut self.next_vehicle_id,
-                    vehicle_revision: &mut self.vehicle_revision,
-                    traj_dirty: &mut self.traj_dirty,
-                    vehicle_profiles: vehicle_profiles.as_ref(),
-                };
-                queue.drain_with(|request| {
-                    let effects = control_service::LayoutControlEffects::for_success(&request);
-                    let result = control_service::apply(&mut control, request);
-                    if result.is_ok() {
-                        layout_effects.merge(effects);
-                    }
-                    result
-                });
-            }
-            self.apply_layout_control_effects(layout_effects);
+        }
+
+        let vehicle_profiles =
+            crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
+        let mut layout_effects = control_service::LayoutControlEffects::default();
+        {
+            let mut control = control_service::AppControl {
+                markers: &mut self.markers,
+                workspace: &mut self.workspace,
+                windows: &mut self.windows,
+                playback: &mut self.playback,
+                next_window_id: &mut self.next_window_id,
+                caches: &mut self.caches,
+                snapshot: &snapshot,
+                vehicles: &mut self.vehicles,
+                next_vehicle_id: &mut self.next_vehicle_id,
+                vehicle_revision: &mut self.vehicle_revision,
+                traj_dirty: &mut self.traj_dirty,
+                vehicle_profiles: vehicle_profiles.as_ref(),
+            };
+            self.control_queue.drain_with(|call| {
+                let effects = control_service::LayoutControlEffects::for_success(call.request());
+                let result = control_service::apply_call(&mut control, call);
+                if result.is_ok() {
+                    layout_effects.merge(effects);
+                }
+                result
+            });
+        }
+        self.apply_layout_control_effects(layout_effects);
+
+        #[cfg(feature = "scripting")]
+        {
             for batch in self.scripts.take_control_batches() {
                 for request in batch {
                     let effects = control_service::LayoutControlEffects::for_success(&request);
@@ -3702,7 +3719,7 @@ impl eframe::App for DelogApp {
                         self.push_log(PendingLog::with_target(
                             LogLevel::Error,
                             "python-control",
-                            error,
+                            error.to_string(),
                         ));
                     } else {
                         self.apply_layout_control_effects(effects);

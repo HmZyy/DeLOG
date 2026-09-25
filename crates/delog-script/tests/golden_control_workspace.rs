@@ -24,7 +24,11 @@ impl ControlHost for Recorder {
                 Ok(ControlResponse::Plots(vec![plot_fixture()]))
             }
             ControlRequest::Workspace(WorkspaceRequest::OpenWindow { .. }) => {
-                Ok(ControlResponse::Window(1))
+                Ok(ControlResponse::Window(delog_api::control::WindowInfo {
+                    id: 1,
+                    title: "Window 1".into(),
+                    owner: None,
+                }))
             }
             _ => Ok(ControlResponse::Unit),
         }
@@ -33,8 +37,10 @@ impl ControlHost for Recorder {
 
 fn plot_fixture() -> PlotInfo {
     PlotInfo {
+        owner: None,
         window: 0,
         tile: 7,
+        instance_id: 1,
         index: 0,
         label: "Plot 1".into(),
     }
@@ -50,9 +56,41 @@ fn splitting_a_plot_names_the_pane_and_the_direction() {
     .unwrap();
     assert!(recorder.seen.lock().unwrap().iter().any(|r| matches!(
         r,
-        ControlRequest::Workspace(WorkspaceRequest::Split { window: 0, tile: 7, direction })
+        ControlRequest::Workspace(WorkspaceRequest::Split { window: 0, tile: 7, direction, .. })
             if *direction == SplitDirection::Vertical
     )));
+}
+
+#[test]
+fn workspace_creation_requests_carry_the_current_script_owner() {
+    use delog_api::control::ResourceOwner;
+    let recorder = Arc::new(Recorder::default());
+    delog_script::control::testing::eval_named_with_host(
+        recorder.clone(), "flight.py", 7,
+        "delog.workspace.add_plot()\ndelog.workspace.split(delog.plots()[0], 'vertical')\ndelog.windows.open(title='Analysis')",
+    ).unwrap();
+    let seen = recorder.seen.lock().unwrap();
+    let owners: Vec<_> = seen
+        .iter()
+        .filter_map(|request| match request {
+            ControlRequest::Workspace(
+                WorkspaceRequest::AddPlot { owner, .. }
+                | WorkspaceRequest::Split { owner, .. }
+                | WorkspaceRequest::OpenWindow { owner, .. },
+            ) => Some(owner.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        owners,
+        vec![
+            Some(ResourceOwner {
+                name: "flight.py".into(),
+                generation: 7
+            });
+            3
+        ]
+    );
 }
 
 #[test]
@@ -127,7 +165,7 @@ fn adding_a_plot_returns_a_new_handle() {
     .unwrap();
     assert!(recorder.seen.lock().unwrap().iter().any(|r| matches!(
         r,
-        ControlRequest::Workspace(WorkspaceRequest::AddPlot { direction })
+        ControlRequest::Workspace(WorkspaceRequest::AddPlot { direction, .. })
             if *direction == SplitDirection::Horizontal
     )));
 }
@@ -170,10 +208,10 @@ fn equalize_and_show_scene_reach_the_host() {
     )
     .unwrap();
     let seen = recorder.seen.lock().unwrap();
-    assert!(
-        seen.iter()
-            .any(|r| matches!(r, ControlRequest::Workspace(WorkspaceRequest::Equalize)))
-    );
+    assert!(seen.iter().any(|r| matches!(
+        r,
+        ControlRequest::Workspace(WorkspaceRequest::Equalize { .. })
+    )));
     assert!(seen.iter().any(|r| matches!(
         r,
         ControlRequest::Workspace(WorkspaceRequest::ShowScene { visible: true })
@@ -190,7 +228,7 @@ fn opening_a_window_names_its_title() {
     .unwrap();
     assert!(recorder.seen.lock().unwrap().iter().any(|r| matches!(
         r,
-        ControlRequest::Workspace(WorkspaceRequest::OpenWindow { title })
+        ControlRequest::Workspace(WorkspaceRequest::OpenWindow { title, .. })
             if title.as_deref() == Some("Compare")
     )));
 }

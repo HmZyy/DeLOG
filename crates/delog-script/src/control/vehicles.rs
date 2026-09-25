@@ -225,7 +225,7 @@ impl VehiclePy {
             id: self.info.id,
             patch: patch.clone(),
         };
-        if stage_batch_request(&ControlRequest::Vehicles(request.clone()))
+        if stage_batch_request(&ControlRequest::Vehicles(Box::new(request.clone())))
             .map_err(control_call_error)?
         {
             self.info
@@ -469,13 +469,13 @@ pub(crate) fn static_orientation() -> VehicleOrientationPy {
 }
 
 fn request_vehicles(py: Python<'_>, request: VehicleRequest) -> PyResult<Vec<VehicleInfo>> {
-    let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
+    let response = call_immediate_detached(py, ControlRequest::Vehicles(Box::new(request)))
         .map_err(control_call_error)?;
     response.into_vehicles().map_err(crate::errors::control)
 }
 
 fn request_unit(py: Python<'_>, request: VehicleRequest) -> PyResult<()> {
-    let response = call_immediate_detached(py, ControlRequest::Vehicles(request))
+    let response = call_immediate_detached(py, ControlRequest::Vehicles(Box::new(request)))
         .map_err(control_call_error)?;
     response.into_unit().map_err(crate::errors::control)
 }

@@ -23,7 +23,14 @@ impl WorkspacePy {
     #[pyo3(signature = (*, split="horizontal"))]
     fn add_plot(&self, py: Python<'_>, split: &str) -> PyResult<PlotPy> {
         let direction = parse_split_direction(split)?;
-        self.request_plot(py, WorkspaceRequest::AddPlot { direction })
+        self.request_plot(
+            py,
+            WorkspaceRequest::AddPlot {
+                window: None,
+                direction,
+                owner: self.context.owner.clone(),
+            },
+        )
     }
 
     fn split(&self, py: Python<'_>, plot: PyRef<'_, PlotPy>, direction: &str) -> PyResult<PlotPy> {
@@ -34,6 +41,7 @@ impl WorkspacePy {
                 window: plot.window,
                 tile: plot.tile,
                 direction,
+                owner: self.context.owner.clone(),
             },
         )
     }
@@ -49,7 +57,7 @@ impl WorkspacePy {
     }
 
     fn equalize(&self, py: Python<'_>) -> PyResult<()> {
-        self.request_unit(py, WorkspaceRequest::Equalize)
+        self.request_unit(py, WorkspaceRequest::Equalize { window: None })
     }
 
     fn show_scene(&self, py: Python<'_>, visible: bool) -> PyResult<()> {
@@ -83,8 +91,16 @@ impl WorkspacePy {
 }
 
 #[pyclass(unsendable, name = "Windows", skip_from_py_object)]
-#[derive(Clone, Default)]
-pub struct WindowsPy;
+#[derive(Clone)]
+pub struct WindowsPy {
+    context: PlotContext,
+}
+
+impl WindowsPy {
+    pub(crate) fn new(context: PlotContext) -> Self {
+        Self { context }
+    }
+}
 
 #[pymethods]
 impl WindowsPy {
@@ -92,7 +108,10 @@ impl WindowsPy {
     fn open(&self, py: Python<'_>, title: Option<String>) -> PyResult<WindowPy> {
         let response = call_immediate_detached(
             py,
-            ControlRequest::Workspace(WorkspaceRequest::OpenWindow { title }),
+            ControlRequest::Workspace(WorkspaceRequest::OpenWindow {
+                title,
+                owner: self.context.owner.clone(),
+            }),
         )
         .map_err(control_call_error)?;
         response

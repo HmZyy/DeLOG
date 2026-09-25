@@ -1,17 +1,19 @@
 use delog_api::control::{ControlResponse, VehicleProfileRequest};
+use delog_api::{Error, Result};
 
-use super::{AppControl, mark_vehicles_changed, validate_source, vehicle_info};
+use super::{AppControl, mark_vehicles_changed, validate_source, vehicle_index, vehicle_info};
 
 pub(crate) fn apply_vehicle_profile_request(
     control: &mut AppControl<'_>,
     request: VehicleProfileRequest,
-) -> Result<ControlResponse, String> {
+) -> Result<ControlResponse> {
     use crate::scene3d::vehicle::VehicleOwner;
     use crate::session::vehicle_profiles::VehicleProfileDoc;
 
     let library = control.vehicle_profiles.ok_or_else(|| {
-        "vehicle profile library is unavailable because the app has no configuration directory"
-            .to_string()
+        Error::execution(
+            "vehicle profile library is unavailable because the app has no configuration directory",
+        )
     })?;
     match request {
         VehicleProfileRequest::List => library
@@ -19,17 +21,14 @@ pub(crate) fn apply_vehicle_profile_request(
             .map(ControlResponse::Names)
             .map_err(|error| profile_io_error("list", None, library, error)),
         VehicleProfileRequest::Save { name, vehicle_id } => {
-            crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)?;
-            let vehicle = control
-                .vehicles
-                .iter()
-                .find(|vehicle| vehicle.runtime.id == vehicle_id)
-                .ok_or_else(|| format!("vehicle {vehicle_id} is gone"))?;
+            crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)
+                .map_err(Error::internal)?;
+            let vehicle = &control.vehicles[vehicle_index(control.vehicles, vehicle_id)?];
             let doc = VehicleProfileDoc::from_config(&name, vehicle, control.snapshot)
                 .ok_or_else(|| {
-                    format!(
+                    Error::stale_handle(format!(
                         "vehicle {vehicle_id} cannot be saved as profile '{name}' because its fields do not resolve"
-                    )
+                    ))
                 })?;
             library
                 .save(&name, &doc)
@@ -40,7 +39,9 @@ pub(crate) fn apply_vehicle_profile_request(
             let doc = library
                 .load(&name)
                 .map_err(|error| profile_io_error("load", Some(&name), library, error))?;
-            Ok(ControlResponse::VehicleProfile(doc.to_script_info()))
+            Ok(ControlResponse::VehicleProfile(Box::new(
+                doc.to_script_info(),
+            )))
         }
         VehicleProfileRequest::Apply {
             name,
@@ -55,15 +56,19 @@ pub(crate) fn apply_vehicle_profile_request(
             let mut vehicle = doc
                 .to_config_for_source(control.snapshot, source_id)
                 .ok_or_else(|| {
-                    format!("profile '{name}' does not resolve for source '{source}'")
+                    Error::not_found(format!(
+                        "profile '{name}' does not resolve for source '{source}'"
+                    ))
                 })?;
             vehicle.runtime.owner = owner.map(|owner| VehicleOwner {
                 name: owner.name,
                 generation: owner.generation,
             });
 
-            crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)?;
-            crate::scene3d::vehicle::assign_runtime_id(&mut vehicle, control.next_vehicle_id)?;
+            crate::scene3d::vehicle::assign_runtime_ids(control.vehicles, control.next_vehicle_id)
+                .map_err(Error::internal)?;
+            crate::scene3d::vehicle::assign_runtime_id(&mut vehicle, control.next_vehicle_id)
+                .map_err(Error::internal)?;
             let index = control.vehicles.len();
             let info = vehicle_info(&vehicle, index, control.snapshot)?;
             control.vehicles.push(vehicle);
@@ -84,13 +89,13 @@ fn profile_io_error(
     name: Option<&str>,
     library: &crate::session::vehicle_profiles::VehicleProfileLibrary,
     error: std::io::Error,
-) -> String {
+) -> Error {
     let invalid = if error.kind() == std::io::ErrorKind::InvalidData {
         "invalid profile: "
     } else {
         ""
     };
-    match name {
+    let message = match name {
         Some(name) => format!(
             "could not {operation} vehicle profile '{name}' in '{}': {invalid}{error}",
             library.dir().display()
@@ -99,5 +104,16 @@ fn profile_io_error(
             "could not {operation} vehicle profiles in '{}': {invalid}{error}",
             library.dir().display()
         ),
+    };
+    match error.kind() {
+        std::io::ErrorKind::NotFound
+            if name.is_some() && matches!(operation, "load" | "apply" | "delete") =>
+        {
+            Error::not_found(message)
+        }
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            Error::invalid_input(message)
+        }
+        _ => Error::execution(message),
     }
 }

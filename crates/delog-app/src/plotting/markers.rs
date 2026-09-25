@@ -1,26 +1,19 @@
-#[cfg(feature = "scripting")]
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-#[cfg(feature = "scripting")]
 use delog_api::control::{
     ControlResponse, MarkerFilter, MarkerInfo, MarkerOrigin as ScriptMarkerOrigin, MarkerPatch,
     MarkerRequest,
 };
-#[cfg(feature = "scripting")]
 use delog_api::markers::PendingMarker;
+use delog_api::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkerOrigin {
     Manual,
-    #[cfg(feature = "scripting")]
-    Script {
-        owner: String,
-        generation: u64,
-    },
+    Script { owner: String, generation: u64 },
 }
 
-#[cfg(feature = "scripting")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScriptMarkerState {
     generation: u64,
@@ -58,7 +51,6 @@ impl Marker {
 pub struct Markers {
     items: Vec<Marker>,
     next_id: u64,
-    #[cfg(feature = "scripting")]
     script_states: HashMap<String, ScriptMarkerState>,
 }
 
@@ -95,12 +87,34 @@ impl Markers {
         });
     }
 
-    #[cfg(feature = "scripting")]
-    pub fn apply_control_request(
-        &mut self,
-        request: MarkerRequest,
-    ) -> Result<ControlResponse, String> {
+    pub fn apply_control_request(&mut self, request: MarkerRequest) -> Result<ControlResponse> {
         match request {
+            MarkerRequest::AppendReturning {
+                owner,
+                generation,
+                marker,
+            } => {
+                validate_pending_markers(std::slice::from_ref(&marker))?;
+                let mut state = match self.script_states.get(&owner).copied() {
+                    Some(state) if generation < state.generation => {
+                        return Err(Error::stale_handle("marker generation is stale"));
+                    }
+                    Some(state) if generation == state.generation => state,
+                    _ => ScriptMarkerState {
+                        generation,
+                        next_palette_index: 0,
+                    },
+                };
+                let id = self.next_id;
+                self.insert_script_markers(&owner, generation, vec![marker], &mut state);
+                self.script_states.insert(owner, state);
+                let info = self
+                    .marker_infos()
+                    .into_iter()
+                    .find(|item| item.id == id)
+                    .expect("just inserted marker");
+                Ok(ControlResponse::Marker(info))
+            }
             MarkerRequest::Append {
                 owner,
                 generation,
@@ -137,7 +151,7 @@ impl Markers {
                     .items
                     .iter_mut()
                     .find(|marker| marker.id == id)
-                    .ok_or_else(|| format!("marker {id} is gone"))?;
+                    .ok_or_else(|| Error::stale_handle(format!("marker {id} is gone")))?;
                 apply_marker_patch(marker, patch);
                 Ok(ControlResponse::Unit)
             }
@@ -149,8 +163,11 @@ impl Markers {
         }
     }
 
-    #[cfg(feature = "scripting")]
-    fn marker_infos(&self) -> Vec<MarkerInfo> {
+    pub(crate) fn count(&self) -> usize {
+        self.items.len()
+    }
+
+    pub(crate) fn marker_infos(&self) -> Vec<MarkerInfo> {
         self.by_time()
             .into_iter()
             .enumerate()
@@ -175,15 +192,14 @@ impl Markers {
             .collect()
     }
 
-    #[cfg(feature = "scripting")]
-    fn remove_filtered(&mut self, filter: MarkerFilter) -> Result<(), String> {
+    fn remove_filtered(&mut self, filter: MarkerFilter) -> Result<()> {
         match filter {
             MarkerFilter::Id(id) => {
                 let index = self
                     .items
                     .iter()
                     .position(|marker| marker.id == id)
-                    .ok_or_else(|| format!("marker {id} is gone"))?;
+                    .ok_or_else(|| Error::stale_handle(format!("marker {id} is gone")))?;
                 self.items.remove(index);
             }
             MarkerFilter::Index(index) => {
@@ -191,7 +207,7 @@ impl Markers {
                     .by_time()
                     .get(index)
                     .map(|marker| marker.id)
-                    .ok_or_else(|| format!("marker index {index} is gone"))?;
+                    .ok_or_else(|| Error::stale_handle(format!("marker index {index} is gone")))?;
                 self.items.retain(|marker| marker.id != id);
             }
             MarkerFilter::Owner(owner) => self.items.retain(|marker| {
@@ -230,7 +246,6 @@ impl Markers {
         Ok(())
     }
 
-    #[cfg(feature = "scripting")]
     fn rebuild_script_states(&mut self) {
         let mut states = HashMap::<String, ScriptMarkerState>::new();
         for marker in &self.items {
@@ -262,7 +277,6 @@ impl Markers {
         self.script_states = states;
     }
 
-    #[cfg(feature = "scripting")]
     pub(crate) fn sweep_generation(&mut self, owner: &str, generation: u64, commit: bool) {
         self.items.retain(|marker| {
             let MarkerOrigin::Script {
@@ -283,7 +297,6 @@ impl Markers {
         self.rebuild_script_states();
     }
 
-    #[cfg(feature = "scripting")]
     fn insert_script_markers(
         &mut self,
         owner: &str,
@@ -312,7 +325,6 @@ impl Markers {
         }
     }
 
-    #[cfg(feature = "scripting")]
     fn remove_script_markers(&mut self, owner: &str) {
         self.items.retain(|marker| {
             !matches!(&marker.origin, MarkerOrigin::Script { owner: marker_owner, .. } if marker_owner == owner)
@@ -341,16 +353,14 @@ impl Markers {
     #[cfg_attr(not(feature = "scripting"), allow(dead_code))]
     pub(crate) fn clear_preserving_ids(&mut self) {
         self.items.clear();
-        #[cfg(feature = "scripting")]
         self.script_states.clear();
     }
 }
 
-#[cfg(feature = "scripting")]
-fn validate_pending_markers(markers: &[PendingMarker]) -> Result<(), String> {
+fn validate_pending_markers(markers: &[PendingMarker]) -> Result<()> {
     for marker in markers {
         if marker.label.is_empty() {
-            return Err("marker label must not be empty".into());
+            return Err(Error::invalid_input("marker label must not be empty"));
         }
         if let Some(color) = marker.color {
             validate_marker_color(color)?;
@@ -359,24 +369,23 @@ fn validate_pending_markers(markers: &[PendingMarker]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(feature = "scripting")]
-fn validate_marker_patch(patch: &MarkerPatch) -> Result<(), String> {
-    patch.validate().map_err(delog_api::Error::into_message)
+fn validate_marker_patch(patch: &MarkerPatch) -> Result<()> {
+    patch.validate()
 }
 
-#[cfg(feature = "scripting")]
-fn validate_marker_color(color: [f32; 4]) -> Result<(), String> {
+fn validate_marker_color(color: [f32; 4]) -> Result<()> {
     if color
         .iter()
         .all(|component| component.is_finite() && (0.0..=1.0).contains(component))
     {
         Ok(())
     } else {
-        Err("marker color components must be finite and between 0 and 1".into())
+        Err(Error::invalid_input(
+            "marker color components must be finite and between 0 and 1",
+        ))
     }
 }
 
-#[cfg(feature = "scripting")]
 fn apply_marker_patch(marker: &mut Marker, patch: MarkerPatch) {
     if let Some(t_us) = patch.t_us {
         marker.t_us = t_us;
@@ -538,7 +547,6 @@ fn fmt_rel(t_us: i64, origin_us: i64) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "scripting")]
     fn pending(time_us: i64, label: &str, color: Option<[f32; 4]>) -> PendingMarker {
         PendingMarker {
             time_us,
@@ -548,7 +556,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "scripting")]
     fn labels(markers: &Markers) -> Vec<&str> {
         markers
             .as_slice()
@@ -607,7 +614,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_commit_preserves_manual_and_replaces_only_older_owner_generations() {
         let mut markers = Markers::new();
         markers.add_at(5);
@@ -640,7 +646,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_append_rejects_lower_generation() {
         let mut markers = Markers::new();
         for (generation, marker) in [
@@ -660,7 +665,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_append_accumulates_at_equal_generation() {
         let mut markers = Markers::new();
         for label in ["first", "second"] {
@@ -677,7 +681,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_append_advances_generation_without_clearing_history() {
         let mut markers = Markers::new();
         for (generation, marker) in [
@@ -711,7 +714,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_remove_deletes_only_requested_owner() {
         let mut markers = Markers::new();
         markers.add_at(1);
@@ -734,7 +736,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn script_markers_keep_duplicate_timestamps_and_explicit_colors() {
         let explicit = [0.1, 0.2, 0.3, 0.4];
         let mut markers = Markers::new();
@@ -757,7 +758,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn a_new_script_generation_resets_automatic_palette_ordinal() {
         let explicit = [0.9, 0.8, 0.7, 0.6];
         let mut markers = Markers::new();
@@ -792,7 +792,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn control_list_uses_time_then_id_order_and_reports_origins() {
         let mut markers = Markers::new();
         let manual = markers.add_at(20);
@@ -828,7 +827,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn control_set_keeps_stable_identity_when_time_reorders() {
         let mut markers = Markers::new();
         markers
@@ -863,12 +861,11 @@ mod tests {
                 },
             })
             .unwrap_err();
-        assert!(error.contains("gone"), "{error}");
+        assert!(error.to_string().contains("gone"), "{error}");
         assert_eq!(markers, before);
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn broad_filters_protect_manual_markers_until_explicitly_requested() {
         let mut markers = Markers::new();
         let manual = markers.add_at(10);
@@ -904,7 +901,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "scripting")]
     fn rolling_back_a_new_generation_reactivates_older_live_appends() {
         let mut markers = Markers::new();
         markers

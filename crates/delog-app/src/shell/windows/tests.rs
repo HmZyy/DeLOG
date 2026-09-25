@@ -46,16 +46,6 @@ fn each_window_profiles_its_tree_under_its_own_name() {
 }
 
 #[test]
-fn the_next_id_clears_every_open_window() {
-    assert_eq!(next_window_id(&[]), 1);
-    assert_eq!(next_window_id(&[window_with(2, &[])]), 3);
-    assert_eq!(
-        next_window_id(&[window_with(5, &[]), window_with(1, &[])]),
-        6
-    );
-}
-
-#[test]
 fn union_fields_spans_every_window_without_duplicates() {
     let main = workspace_with(&[1, 2]);
     let windows = vec![window_with(1, &[2, 3]), window_with(2, &[4])];
@@ -388,4 +378,45 @@ fn plot_infos_span_every_window_and_carry_their_real_ids() {
     assert_eq!(windows, [0, 3, 3]);
     let indices: Vec<usize> = infos.iter().map(|i| i.index).collect();
     assert_eq!(indices, [0, 0, 1], "index is per-window, not global");
+}
+
+#[test]
+fn restored_windows_get_fresh_ids_and_the_counter_never_moves_backwards() {
+    let mut windows = vec![window_with(2, &[])];
+    let mut next = 9;
+    let restored = vec![window_with(3, &[1]), window_with(12, &[])];
+
+    install_restored_windows(&mut windows, &mut next, restored).unwrap();
+
+    assert_eq!(
+        windows.iter().map(|window| window.id.0).collect::<Vec<_>>(),
+        [13, 14]
+    );
+    assert_eq!(next, 15);
+    for window in &windows {
+        assert_eq!(
+            window.workspace.tree.id(),
+            egui::Id::new(("plot_workspace", window.id.0))
+        );
+    }
+    assert_eq!(
+        windows[0].workspace.fields().collect::<Vec<_>>(),
+        [FieldId(1)]
+    );
+
+    let mut next = 20;
+    install_restored_windows(&mut windows, &mut next, vec![window_with(1, &[])]).unwrap();
+    assert_eq!(windows[0].id, WindowId(20));
+    assert_eq!(next, 21);
+}
+
+#[test]
+fn restoring_windows_fails_without_touching_state_when_ids_are_exhausted() {
+    let mut windows = vec![window_with(2, &[])];
+    let mut next = u64::MAX;
+    let result = install_restored_windows(&mut windows, &mut next, vec![window_with(1, &[])]);
+
+    assert!(result.is_err());
+    assert_eq!(windows[0].id, WindowId(2));
+    assert_eq!(next, u64::MAX);
 }

@@ -158,13 +158,13 @@ fn prune_removed_fields_rebinds_script_traces_to_recreated_fields() {
     assert_eq!(
         pane.traces[0],
         TraceRef {
+            instance_id: pane.traces[0].instance_id,
             field: new_field,
             color: [0.1, 0.2, 0.3, 0.4],
             width_px: 3.0,
             mode: TraceMode::Step,
             visible: false,
             label_override: None,
-            #[cfg(feature = "scripting")]
             owner: None,
         }
     );
@@ -195,6 +195,10 @@ fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
         trace.width_px = 4.0;
         trace.mode = TraceMode::Scatter;
         trace.visible = false;
+        trace.owner = Some(delog_api::control::ResourceOwner {
+            name: "calc".into(),
+            generation: 7,
+        });
         pane.text_filters.insert(old_field, "armed".into());
         pane.text_offsets.insert((old_field, 42), 0.75);
     }
@@ -217,6 +221,13 @@ fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
         assert!(!pane.ghosts[0].visible);
         assert_eq!(pane.ghosts[0].text_filter.as_deref(), Some("armed"));
         assert_eq!(pane.ghosts[0].text_offsets, vec![(42, 0.75)]);
+        assert_eq!(
+            pane.ghosts[0].owner,
+            Some(delog_api::control::ResourceOwner {
+                name: "calc".into(),
+                generation: 7
+            })
+        );
     }
 
     let new_source = identity.add_source("script:calc");
@@ -232,14 +243,17 @@ fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
     assert_eq!(
         pane.traces[0],
         TraceRef {
+            instance_id: pane.traces[0].instance_id,
             field: new_field,
             color: [0.4, 0.3, 0.2, 0.1],
             width_px: 4.0,
             mode: TraceMode::Scatter,
             visible: false,
             label_override: None,
-            #[cfg(feature = "scripting")]
-            owner: None,
+            owner: Some(delog_api::control::ResourceOwner {
+                name: "calc".into(),
+                generation: 7
+            }),
         }
     );
     assert_eq!(pane.text_filters.get(&new_field).unwrap(), "armed");
@@ -480,6 +494,7 @@ fn ghost_trace_resolves_when_matching_field_loads() {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
+        owner: None,
         source: None,
         topic: "ATT".into(),
         field: "Roll".into(),
@@ -517,6 +532,7 @@ fn ghost_trace_stays_missing_when_field_is_ambiguous() {
         panic!("root should be a plot");
     };
     pane.add_ghost(crate::plotting::plot::GhostTrace {
+        owner: None,
         source: None,
         topic: "ATT".into(),
         field: "Roll".into(),
@@ -918,13 +934,13 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
         &mut workspace,
         first,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: roll,
             color: [1.0, 0.0, 0.0, 1.0],
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: true,
             label_override: Some("Bank".to_owned()),
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -932,13 +948,13 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
         &mut workspace,
         first,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: pitch,
             color: [0.0, 1.0, 0.0, 1.0],
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: false,
             label_override: None,
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -951,13 +967,13 @@ fn inspector_flattens_visible_trace_instances_in_layout_order() {
         &mut workspace,
         second,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: roll,
             color: [0.0, 0.0, 1.0, 1.0],
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: true,
             label_override: None,
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -981,13 +997,13 @@ fn legend_move_edge_recolors_and_removes_emptied_source() {
         &mut ws,
         source,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: FieldId(3),
             color: [0.2, 0.4, 0.6, 1.0],
             width_px: 5.0,
             mode: TraceMode::Step,
             visible: false,
             label_override: Some("renamed".to_string()),
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -1028,13 +1044,13 @@ fn legend_move_center_recolors_to_target_palette_slot() {
         &mut ws,
         source,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: FieldId(5),
             color: [0.9, 0.1, 0.1, 1.0],
             width_px: 3.0,
             mode: TraceMode::Step,
             visible: true,
             label_override: Some("keep".to_string()),
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -1048,13 +1064,13 @@ fn legend_move_center_recolors_to_target_palette_slot() {
             &mut ws,
             target,
             TraceRef {
+                instance_id: crate::plotting::plot::next_resource_instance_id(),
                 field,
                 color: [0.0, 0.0, 0.0, 1.0],
                 width_px: 1.0,
                 mode: TraceMode::Line,
                 visible: true,
                 label_override: None,
-                #[cfg(feature = "scripting")]
                 owner: None,
             },
         );
@@ -1088,13 +1104,13 @@ fn legend_move_keeps_source_when_traces_remain() {
             &mut ws,
             source,
             TraceRef {
+                instance_id: crate::plotting::plot::next_resource_instance_id(),
                 field,
                 color: [0.1, 0.1, 0.1, 1.0],
                 width_px: 1.0,
                 mode: TraceMode::Line,
                 visible: true,
                 label_override: None,
-                #[cfg(feature = "scripting")]
                 owner: None,
             },
         );
@@ -1128,13 +1144,13 @@ fn legend_move_center_into_pane_with_same_field_dedups_and_keeps_target() {
         &mut ws,
         source,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: FieldId(1),
             color: [1.0, 0.0, 0.0, 1.0],
             width_px: 2.0,
             mode: TraceMode::Line,
             visible: true,
             label_override: Some("A".to_string()),
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -1147,13 +1163,13 @@ fn legend_move_center_into_pane_with_same_field_dedups_and_keeps_target() {
         &mut ws,
         target,
         TraceRef {
+            instance_id: crate::plotting::plot::next_resource_instance_id(),
             field: FieldId(1),
             color: [0.0, 1.0, 0.0, 1.0],
             width_px: 8.0,
             mode: TraceMode::Scatter,
             visible: true,
             label_override: Some("B".to_string()),
-            #[cfg(feature = "scripting")]
             owner: None,
         },
     );
@@ -1694,4 +1710,17 @@ fn a_placeholder_workspace_holds_no_panes() {
 
     assert_eq!(placeholder.fields().count(), 0);
     assert!(placeholder.tree.root().is_none());
+}
+
+#[test]
+fn closing_the_last_plot_of_an_extended_window_keeps_its_tree_identity() {
+    let window = crate::shell::windows::WindowId(4);
+    let mut workspace = Workspace::new_for(window);
+    let root = workspace.tree.root().unwrap();
+
+    workspace.close_plot(root);
+
+    assert_eq!(workspace.plot_panes().count(), 1);
+    assert_eq!(workspace.tree.id(), Workspace::new_for(window).tree.id());
+    assert_ne!(workspace.tree.id(), Workspace::new().tree.id());
 }

@@ -1,13 +1,19 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "scripting")]
-use delog_api::control::ScriptOwner;
+use delog_api::control::ResourceOwner;
 use delog_core::identity::FieldId;
 use delog_core::time::TimeRange;
 use delog_render::palette;
 
 const MIN_SPAN_US: f64 = 1.0;
 const MAX_SPAN_US: f64 = 1e18;
+
+static NEXT_RESOURCE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_resource_instance_id() -> u64 {
+    NEXT_RESOURCE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewX {
@@ -107,6 +113,8 @@ pub fn draw_zoom_drag_overlay(ui: &egui::Ui, plot_rect: egui::Rect, anchor_x: f3
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceRef {
+    /// Runtime identity survives vector reordering and is never reused.
+    pub instance_id: u64,
     pub field: FieldId,
     /// sRGB straight RGBA; the renderer converts to the target's colour space.
     pub color: [f32; 4],
@@ -115,12 +123,12 @@ pub struct TraceRef {
     pub visible: bool,
     /// Session-only, per-plot rename. `None` = derived `topic.field` label.
     pub label_override: Option<String>,
-    #[cfg(feature = "scripting")]
-    pub owner: Option<ScriptOwner>,
+    pub owner: Option<ResourceOwner>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostTrace {
+    pub owner: Option<ResourceOwner>,
     pub source: Option<String>,
     pub topic: String,
     pub field: String,
@@ -197,6 +205,9 @@ pub fn rename_value(text: &str) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub struct PlotPane {
+    /// Runtime identity survives tile ID reuse after a pane is replaced.
+    pub instance_id: u64,
+    pub owner: Option<ResourceOwner>,
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,
     pub show_legend: bool,
@@ -217,6 +228,8 @@ pub struct PlotPane {
 impl Default for PlotPane {
     fn default() -> Self {
         Self {
+            instance_id: next_resource_instance_id(),
+            owner: None,
             traces: Vec::new(),
             ghosts: Vec::new(),
             show_legend: true,
@@ -239,13 +252,13 @@ impl PlotPane {
         }
         let color = palette::trace_color(self.traces.len()).to_srgb_f32();
         self.traces.push(TraceRef {
+            instance_id: next_resource_instance_id(),
             field,
             color,
             width_px: 1.5,
             mode: TraceMode::Line,
             visible: true,
             label_override: None,
-            #[cfg(feature = "scripting")]
             owner: None,
         });
         true
@@ -414,6 +427,7 @@ mod tests {
     #[test]
     fn remove_ghost_drops_only_the_indexed_entry_and_ignores_out_of_range() {
         let ghost = |field: &str| GhostTrace {
+            owner: None,
             source: None,
             topic: "TOPIC".to_string(),
             field: field.to_string(),
@@ -502,13 +516,13 @@ mod tests {
     fn add_trace_ref_inserts_full_trace_and_dedups_without_overwrite() {
         let mut pane = PlotPane::default();
         let t = TraceRef {
+            instance_id: next_resource_instance_id(),
             field: FieldId(7),
             color: [0.1, 0.2, 0.3, 1.0],
             width_px: 4.0,
             mode: TraceMode::Step,
             visible: false,
             label_override: Some("v".to_string()),
-            #[cfg(feature = "scripting")]
             owner: None,
         };
         assert!(pane.add_trace_ref(t.clone()));

@@ -149,8 +149,14 @@ fn per_frame_cache_requests_span_every_window() {
 #[test]
 fn a_loaded_layout_reserves_ids_above_every_restored_window() {
     assert!(
-        APP.contains("self.next_window_id = crate::shell::windows::next_window_id(&self.windows);"),
-        "the next id must clear the highest restored id, not the window count"
+        APP.contains("crate::shell::windows::install_restored_windows(\n            &mut self.windows,\n            &mut self.next_window_id,"),
+        "a loaded layout must rebind restored windows above every id ever handed out"
+    );
+    assert!(
+        !APP.contains(
+            "self.next_window_id = crate::shell::windows::next_window_id(&self.windows);"
+        ),
+        "resetting the counter to the highest restored id lets a stale handle retarget a restored window"
     );
     assert!(
         !APP.contains("self.next_window_id = self.windows.len() as u64 + 1;"),
