@@ -1,0 +1,10 @@
+{
+  "request_id": "request-v1",
+  "code": "unavailable",
+  "message": "control outcome is unknown",
+  "retryable": true,
+  "details": {
+    "queued": 1
+  },
+  "completion": "unknown"
+}

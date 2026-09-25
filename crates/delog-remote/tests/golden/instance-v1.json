@@ -1,0 +1,8 @@
+{
+  "instance_id": "instance-v1",
+  "label": "Bench flight",
+  "session_description": "flight.ulg",
+  "api_major": 1,
+  "api_min_minor": 0,
+  "api_max_minor": 0
+}
