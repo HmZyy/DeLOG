@@ -16,6 +16,7 @@ const COMMANDS_SOURCE: &str = concat!(
 );
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 const APP_MAIN: &str = include_str!("../src/shell/app/mod.rs");
+const VIEWPORT_ACTIONS_SOURCE: &str = include_str!("../src/shell/app/viewport_actions.rs");
 
 const POPUP_SOURCES: &[&str] = &[
     ABOUT_SOURCE,
@@ -92,7 +93,7 @@ fn the_run_palette_opens_parsers_through_the_host_that_lists_them() {
         "fn run_palette_names",
         "fn open_run_palette_items",
     );
-    let pick = between(APP_MAIN, "fn run_palette_pick", "fn show_layout_windows");
+    let pick = between(APP_MAIN, "fn run_palette_pick", "fn show_hosted_picker");
 
     assert!(
         names.contains("self.scripts.parser_names()"),
@@ -299,9 +300,9 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
         "egui::Key::F9",
         "egui::Key::F12",
     ] {
-        assert!(APP_SOURCE.contains(key));
+        assert!(VIEWPORT_ACTIONS_SOURCE.contains(key));
     }
-    assert!(APP_SOURCE.contains("if let Some(dock) = dock_for_command(command)"));
+    assert!(APP_SOURCE.contains("let Some(dock) = dock_for_command(*command)"));
     assert!(APP_SOURCE.contains("self.open_dock(dock);"));
     assert!(APP_SOURCE.contains("self.toggle_dock(AppDockTab::Diagnostics)"));
 }
@@ -777,7 +778,7 @@ fn context_header_orders_the_application_menus() {
     assert!(!menu_bar.contains("\"Workspace\""));
     assert!(!menu_bar.contains("\"Extensions\""));
     assert!(!menu_bar.contains("Ctrl+K  Commands"));
-    assert!(APP_SOURCE.contains("command_palette::should_toggle_palette"));
+    assert!(VIEWPORT_ACTIONS_SOURCE.contains("command_palette::should_toggle_palette"));
 }
 
 #[test]
@@ -1096,4 +1097,98 @@ fn the_update_popup_offers_both_ways_to_ignore_an_update() {
     assert!(UPDATE_POPUP_SOURCE.contains("\"Skip this version\""));
     assert!(UPDATE_POPUP_SOURCE.contains("\"Stop checking for updates\""));
     assert!(UPDATE_POPUP_SOURCE.contains("UpdateAction::RemindLater"));
+}
+
+#[test]
+fn picker_surfaces_are_separate_from_main_only_dialogs() {
+    const PICKER_IDS: [&str; 5] = [
+        "load-layout-picker",
+        "run-script-picker",
+        "run-palette-kinds",
+        "run-palette-items",
+        "command_palette",
+    ];
+    let main_dialogs = between(APP_MAIN, "fn show_main_dialogs", "fn open_extended_window");
+    let hosted = between(APP_MAIN, "fn show_hosted_picker", "fn show_main_dialogs");
+
+    assert!(main_dialogs.contains("\"Save Layout\""));
+    assert!(main_dialogs.contains("\"Manage Layouts\""));
+    for id in PICKER_IDS {
+        assert!(
+            !main_dialogs.contains(id),
+            "{id} belongs to the hosted picker"
+        );
+        assert!(hosted.contains(id), "{id} should render in its host");
+    }
+    for flow in ["CommandPalette", "LoadLayout", "RunScript", "RunPalette"] {
+        assert!(hosted.contains(&format!("PickerFlow::{flow}")));
+    }
+    for main_only in [
+        "Save Layout",
+        "Manage Layouts",
+        "settings_dialog",
+        "inspector",
+        "dock",
+    ] {
+        assert!(
+            !hosted.contains(main_only),
+            "{main_only} must stay in the main window"
+        );
+    }
+
+    assert!(APP_MAIN.contains("self.show_main_dialogs(ui.ctx());"));
+    assert_eq!(APP_MAIN.matches("self.show_hosted_picker(").count(), 1);
+    let root_call = &APP_MAIN[APP_MAIN.find("self.show_hosted_picker(").unwrap()..];
+    let root_call = &root_call[..root_call.find('{').unwrap()];
+    assert!(root_call.contains("WindowId::MAIN"));
+}
+
+const WINDOW_RENDER_SOURCE: &str = include_str!("../src/shell/app/window_render.rs");
+
+#[test]
+fn extended_viewports_collect_actions_without_dispatching_inside_the_callback() {
+    let render = between(
+        WINDOW_RENDER_SOURCE,
+        "fn render_extended_windows",
+        "fn render_workspace_window",
+    );
+    let callback = between(
+        render,
+        "show_viewport_immediate",
+        "windows[index] = window;",
+    );
+
+    assert!(callback.contains("collect_shortcut_actions("));
+    assert!(callback.contains("self.show_hosted_picker("));
+    assert!(!callback.contains("dispatch_command"));
+    assert!(!callback.contains("apply_viewport_action"));
+
+    let restore = render.find("self.windows = windows;").unwrap();
+    let returned = render.rfind("actions\n").unwrap();
+    assert!(
+        restore < returned,
+        "actions leave only after windows are restored"
+    );
+    assert!(
+        render.find("discard_picker_actions_from").unwrap() < restore,
+        "a closed host's picker output is dropped before returning"
+    );
+
+    let call = APP_MAIN.find("self.render_extended_windows(").unwrap();
+    let apply = APP_MAIN[call..]
+        .find("self.apply_viewport_action(")
+        .unwrap();
+    assert!(!APP_MAIN[call..call + apply].contains("dispatch_command"));
+}
+
+#[test]
+fn extended_browser_focus_uses_the_window_specific_filter_id() {
+    let render = between(
+        WINDOW_RENDER_SOURCE,
+        "fn render_extended_windows",
+        "fn render_workspace_window",
+    );
+
+    assert!(render.contains("std::mem::take(&mut window.browser.focus_filter)"));
+    assert!(render.contains("browser::filter_id(id.id_salt())"));
 }
