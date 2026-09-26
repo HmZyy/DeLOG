@@ -1142,3 +1142,53 @@ fn picker_surfaces_are_separate_from_main_only_dialogs() {
     let root_call = &root_call[..root_call.find('{').unwrap()];
     assert!(root_call.contains("WindowId::MAIN"));
 }
+
+const WINDOW_RENDER_SOURCE: &str = include_str!("../src/shell/app/window_render.rs");
+
+#[test]
+fn extended_viewports_collect_actions_without_dispatching_inside_the_callback() {
+    let render = between(
+        WINDOW_RENDER_SOURCE,
+        "fn render_extended_windows",
+        "fn render_workspace_window",
+    );
+    let callback = between(
+        render,
+        "show_viewport_immediate",
+        "windows[index] = window;",
+    );
+
+    assert!(callback.contains("collect_shortcut_actions("));
+    assert!(callback.contains("self.show_hosted_picker("));
+    assert!(!callback.contains("dispatch_command"));
+    assert!(!callback.contains("apply_viewport_action"));
+
+    let restore = render.find("self.windows = windows;").unwrap();
+    let returned = render.rfind("actions\n").unwrap();
+    assert!(
+        restore < returned,
+        "actions leave only after windows are restored"
+    );
+    assert!(
+        render.find("discard_picker_actions_from").unwrap() < restore,
+        "a closed host's picker output is dropped before returning"
+    );
+
+    let call = APP_MAIN.find("self.render_extended_windows(").unwrap();
+    let apply = APP_MAIN[call..]
+        .find("self.apply_viewport_action(")
+        .unwrap();
+    assert!(!APP_MAIN[call..call + apply].contains("dispatch_command"));
+}
+
+#[test]
+fn extended_browser_focus_uses_the_window_specific_filter_id() {
+    let render = between(
+        WINDOW_RENDER_SOURCE,
+        "fn render_extended_windows",
+        "fn render_workspace_window",
+    );
+
+    assert!(render.contains("std::mem::take(&mut window.browser.focus_filter)"));
+    assert!(render.contains("browser::filter_id(id.id_salt())"));
+}

@@ -3582,7 +3582,18 @@ impl eframe::App for DelogApp {
 
         let windows_ctx = ui.ctx().clone();
         self.alt_held = crate::shell::windows::alt_held(&windows_ctx, &self.windows);
-        self.render_extended_windows(&windows_ctx, frame, &snapshot);
+        let extended_palette_entries = if self.command_palette.is_open()
+            && self.picker_host.is_some_and(|host| !host.window.is_main())
+        {
+            Self::command_palette_entries(command_presentations.clone())
+        } else {
+            Vec::new()
+        };
+        let extended_actions =
+            self.render_extended_windows(&windows_ctx, frame, &snapshot, &extended_palette_entries);
+        for action in extended_actions {
+            self.apply_viewport_action(action, &windows_ctx, frame, &snapshot, range);
+        }
 
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         let mut main_workspace = std::mem::replace(
@@ -3854,7 +3865,9 @@ impl eframe::App for DelogApp {
             }
         }
 
-        let palette_entries = if self.command_palette.is_open() {
+        let palette_entries = if self.command_palette.is_open()
+            && self.picker_host.is_some_and(|host| host.window.is_main())
+        {
             Self::command_palette_entries(command_presentations)
         } else {
             Vec::new()
