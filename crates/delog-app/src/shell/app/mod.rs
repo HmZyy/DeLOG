@@ -1978,7 +1978,10 @@ impl DelogApp {
                 readout_lock: self.lock_readouts,
                 measuring_marker: self.marker_us.is_some(),
                 field_stats_open: self.field_stats.is_open(),
-                legends_visible: self.workspace.all_plot_legends_visible(),
+                legends_visible: crate::shell::windows::all_plot_legends_visible(
+                    &self.workspace,
+                    &self.windows,
+                ),
                 annotation_toolbar_open: self.annotation_toolbar_open,
             },
             dynamic,
@@ -2177,7 +2180,10 @@ impl DelogApp {
                 CommandId::ClearLayout => self.clear_current_layout(),
                 CommandId::ImportLayout => self.spawn_import_layout_dialog(ctx),
                 CommandId::ExportLayout => self.spawn_export_layout_dialog(ctx, snapshot),
-                CommandId::EqualizePlots => self.workspace.equalize_plot_heights(),
+                CommandId::EqualizePlots => crate::shell::windows::equalize_plot_heights(
+                    &mut self.workspace,
+                    &mut self.windows,
+                ),
                 CommandId::OpenDataFlow => self.dataflow.open = true,
                 CommandId::ManageSequences => {
                     self.sequences.manager.open = true;
@@ -2209,8 +2215,15 @@ impl DelogApp {
                         next_legend_position(self.settings.plot.legend_position)
                 }
                 CommandId::ToggleLegends => {
-                    let visible = !self.workspace.all_plot_legends_visible();
-                    self.workspace.set_all_plot_legends(visible);
+                    let visible = !crate::shell::windows::all_plot_legends_visible(
+                        &self.workspace,
+                        &self.windows,
+                    );
+                    crate::shell::windows::set_all_plot_legends(
+                        &mut self.workspace,
+                        &mut self.windows,
+                        visible,
+                    );
                 }
                 CommandId::ToggleFieldStats => {
                     if self.field_stats.is_open() {
@@ -2795,7 +2808,12 @@ impl DelogApp {
     }
 
     fn open_extended_window(&mut self) {
-        crate::shell::windows::open_window(&mut self.windows, &mut self.next_window_id, None);
+        crate::shell::windows::open_window(
+            &mut self.windows,
+            &mut self.next_window_id,
+            None,
+            self.workspace.default_show_legend,
+        );
     }
 
     fn apply_browser_response(
@@ -3077,7 +3095,10 @@ impl eframe::App for DelogApp {
             measuring_marker: self.marker_us.is_some(),
             field_stats_open: self.field_stats.is_open(),
             legend_position: self.settings.plot.legend_position,
-            legends_visible: self.workspace.all_plot_legends_visible(),
+            legends_visible: crate::shell::windows::all_plot_legends_visible(
+                &self.workspace,
+                &self.windows,
+            ),
             annotation_toolbar_open: self.annotation_toolbar_open,
         };
         let header_output = egui::Panel::top("context_header")

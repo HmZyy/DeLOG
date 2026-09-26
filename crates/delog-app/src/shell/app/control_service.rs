@@ -432,7 +432,7 @@ fn apply_workspace_request(
             Ok(ControlResponse::Unit)
         }
         WorkspaceRequest::Equalize => {
-            control.workspace.equalize_plot_heights();
+            crate::shell::windows::equalize_plot_heights(control.workspace, control.windows);
             Ok(ControlResponse::Unit)
         }
         WorkspaceRequest::ShowScene { visible } => {
@@ -442,8 +442,12 @@ fn apply_workspace_request(
             Ok(ControlResponse::Unit)
         }
         WorkspaceRequest::OpenWindow { title } => {
-            let id =
-                crate::shell::windows::open_window(control.windows, control.next_window_id, title);
+            let id = crate::shell::windows::open_window(
+                control.windows,
+                control.next_window_id,
+                title,
+                control.workspace.default_show_legend,
+            );
             Ok(ControlResponse::Window(id.0))
         }
     }
