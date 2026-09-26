@@ -372,39 +372,6 @@ fn running_tab_paints_the_endpoint_and_instance_id_without_the_token() {
     controller.disable().unwrap();
 }
 
-#[test]
-fn empty_client_and_lease_lists_share_a_line_with_their_labels() {
-    let discovery = tempfile::tempdir().unwrap();
-    let ctx = egui::Context::default();
-    let store = Arc::new(DataStore::new());
-    let mut controller = ExternalApiController::new(ctx.clone(), Arc::new(NoControl));
-    controller
-        .enable(
-            tempdir_config(&discovery),
-            Arc::clone(&store),
-            ingest_sender(),
-        )
-        .unwrap();
-    let snapshot = StoreSnapshot::empty();
-
-    let output = run_frames(&ctx, |ui| {
-        let _ = show(&mut controller, ui, &snapshot, &store);
-    });
-
-    for (label, value) in [
-        ("Clients", "No clients connected"),
-        ("Snapshot leases", "No active leases"),
-    ] {
-        let label = text_rect(&output, label);
-        let value = text_rect(&output, value);
-        assert!(
-            (label.min.y - value.min.y).abs() < 1.0,
-            "{label:?} vs {value:?}"
-        );
-    }
-    controller.disable().unwrap();
-}
-
 fn register(controller: &ExternalApiController, name: &str) -> serde_json::Value {
     let handle = controller.handle.as_ref().unwrap();
     let response = reqwest::blocking::Client::builder()
@@ -630,7 +597,7 @@ fn clicking_full_asks_for_confirmation_before_granting_it() {
 }
 
 #[test]
-fn running_window_lists_clients_with_access_counts_and_limits_in_use() {
+fn running_window_shows_limits_in_use_without_client_activity() {
     let discovery = tempfile::tempdir().unwrap();
     let ctx = egui::Context::default();
     let store = Arc::new(DataStore::new());
@@ -649,27 +616,12 @@ fn running_window_lists_clients_with_access_counts_and_limits_in_use() {
         let _ = show(&mut controller, ui, &snapshot, &store);
     });
 
-    assert!(painted(&output, "flight-diagnosis"));
-    assert!(painted(
-        &output,
-        "1 client, 0 leases, 0 downloads, 0 uploads, 0 queued controls"
-    ));
+    assert!(!painted(&output, "flight-diagnosis"));
+    assert!(!painted(&output, "queued controls"));
     assert!(painted(&output, "Concurrent uploads"));
     assert!(painted(&output, "Queued controls per client"));
     assert!(painted(&output, "Control timeout"));
-    assert!(painted(&output, settings_tab::LIMITS_NOTE));
     assert!(painted(&output, "in use: 2 s"));
-    let client_row = text_rect(&output, "flight-diagnosis");
-    let safe_labels: Vec<_> = output
-        .shapes
-        .iter()
-        .filter_map(|shape| find_text_rect(&shape.shape, "Safe"))
-        .collect();
-    assert!(
-        safe_labels
-            .iter()
-            .any(|rect| (rect.center().y - client_row.center().y).abs() < 4.0)
-    );
     assert!(!painted(&output, registered["token"].as_str().unwrap()));
     controller.disable().unwrap();
 }
