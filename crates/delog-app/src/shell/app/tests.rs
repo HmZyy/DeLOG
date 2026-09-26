@@ -10,6 +10,112 @@ use delog_core::snapshot::StoreSnapshot;
 use delog_core::store::TopicStore;
 
 use super::*;
+use crate::shell::windows::{ExtendedWindow, WindowId};
+
+#[test]
+fn data_browser_toggle_from_main_changes_only_main_state() {
+    let mut main_collapsed = true;
+    let mut main_focus_filter = false;
+    let mut windows = vec![
+        ExtendedWindow::new(WindowId(1)),
+        ExtendedWindow::new(WindowId(2)),
+    ];
+    windows[1].browser.collapsed = true;
+
+    toggle_data_browser_for_window(
+        WindowId::MAIN,
+        &mut main_collapsed,
+        &mut main_focus_filter,
+        &mut windows,
+    );
+
+    assert!(!main_collapsed);
+    assert!(main_focus_filter);
+    assert!(!windows[0].browser.collapsed);
+    assert!(windows[1].browser.collapsed);
+
+    toggle_data_browser_for_window(
+        WindowId::MAIN,
+        &mut main_collapsed,
+        &mut main_focus_filter,
+        &mut windows,
+    );
+    assert!(main_collapsed);
+    assert!(!main_focus_filter);
+}
+
+#[test]
+fn data_browser_toggle_from_extended_changes_only_that_window() {
+    let mut main_collapsed = false;
+    let mut main_focus_filter = true;
+    let mut windows = vec![
+        ExtendedWindow::new(WindowId(1)),
+        ExtendedWindow::new(WindowId(2)),
+    ];
+    windows[0].browser.focus_filter = true;
+    windows[1].browser.collapsed = true;
+
+    toggle_data_browser_for_window(
+        WindowId(1),
+        &mut main_collapsed,
+        &mut main_focus_filter,
+        &mut windows,
+    );
+
+    assert!(windows[0].browser.collapsed);
+    assert!(!windows[0].browser.focus_filter);
+    assert!(windows[1].browser.collapsed);
+    assert!(!windows[1].browser.focus_filter);
+    assert!(!main_collapsed);
+    assert!(main_focus_filter);
+}
+
+#[test]
+fn opening_an_extended_browser_requests_its_filter_focus() {
+    let mut main_collapsed = false;
+    let mut main_focus_filter = false;
+    let mut windows = vec![
+        ExtendedWindow::new(WindowId(1)),
+        ExtendedWindow::new(WindowId(2)),
+    ];
+    windows[0].browser.collapsed = true;
+
+    toggle_data_browser_for_window(
+        WindowId(1),
+        &mut main_collapsed,
+        &mut main_focus_filter,
+        &mut windows,
+    );
+
+    assert!(!windows[0].browser.collapsed);
+    assert!(windows[0].browser.focus_filter);
+    assert!(!windows[1].browser.focus_filter);
+}
+
+#[test]
+fn stale_extended_browser_origin_does_not_fall_back_to_main() {
+    let mut main_collapsed = false;
+    let mut main_focus_filter = true;
+    let mut windows = vec![
+        ExtendedWindow::new(WindowId(1)),
+        ExtendedWindow::new(WindowId(2)),
+    ];
+    windows[1].browser.collapsed = true;
+
+    toggle_data_browser_for_window(
+        WindowId(99),
+        &mut main_collapsed,
+        &mut main_focus_filter,
+        &mut windows,
+    );
+
+    assert!(!main_collapsed);
+    assert!(main_focus_filter);
+    assert!(!windows[0].browser.collapsed);
+    assert!(windows[1].browser.collapsed);
+    assert!(!windows[0].browser.focus_filter);
+    assert!(!windows[1].browser.focus_filter);
+}
 
 #[test]
 fn active_native_loads_schedule_reactive_mode_polling() {
@@ -960,8 +1066,8 @@ fn reopening_the_run_palette_returns_to_the_kind_picker() {
 
 #[test]
 fn the_command_palette_opens_on_ctrl_shift_p_not_ctrl_k() {
-    const APP: &str = include_str!("mod.rs");
-    let toggle = APP
+    const VIEWPORT_ACTIONS: &str = include_str!("viewport_actions.rs");
+    let toggle = VIEWPORT_ACTIONS
         .split("should_toggle_palette(")
         .next()
         .expect("the palette toggle should exist");
@@ -1065,13 +1171,13 @@ fn typed_shortcuts_stay_dormant_while_a_widget_owns_the_keyboard() {
 
 #[test]
 fn shortcut_dispatch_gates_on_scope_rather_than_on_focus_alone() {
-    const APP: &str = include_str!("mod.rs");
+    const VIEWPORT_ACTIONS: &str = include_str!("viewport_actions.rs");
 
     assert!(
-        !APP.contains("if !wants_keyboard && !self.command_palette.is_open()"),
+        !VIEWPORT_ACTIONS.contains("if !wants_keyboard && !self.command_palette.is_open()"),
         "a focused widget must not disable every shortcut"
     );
-    assert!(APP.contains("scope.allows(wants_keyboard)"));
+    assert!(VIEWPORT_ACTIONS.contains("scope.allows(wants_keyboard)"));
 }
 
 #[test]
