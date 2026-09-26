@@ -16,6 +16,7 @@ const COMMANDS_SOURCE: &str = concat!(
 );
 const GLOBAL_TOOLBAR_SOURCE: &str = include_str!("../src/shell/app/global_plot_toolbar.rs");
 const APP_MAIN: &str = include_str!("../src/shell/app/mod.rs");
+const VIEWPORT_ACTIONS_SOURCE: &str = include_str!("../src/shell/app/viewport_actions.rs");
 
 const POPUP_SOURCES: &[&str] = &[
     ABOUT_SOURCE,
@@ -299,7 +300,7 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
         "egui::Key::F9",
         "egui::Key::F12",
     ] {
-        assert!(APP_SOURCE.contains(key));
+        assert!(VIEWPORT_ACTIONS_SOURCE.contains(key));
     }
     assert!(APP_SOURCE.contains("if let Some(dock) = dock_for_command(command)"));
     assert!(APP_SOURCE.contains("self.open_dock(dock);"));
