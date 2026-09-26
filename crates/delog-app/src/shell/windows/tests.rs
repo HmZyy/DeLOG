@@ -428,6 +428,7 @@ fn a_new_window_opens_with_its_data_browser_showing() {
     let window = ExtendedWindow::new(WindowId(1));
 
     assert!(!window.browser.collapsed);
+    assert!(!window.browser.focus_filter);
 }
 
 #[test]
@@ -435,8 +436,16 @@ fn a_restored_window_opens_with_its_data_browser_collapsed() {
     let window = ExtendedWindow::restored(WindowId(1));
 
     assert!(window.browser.collapsed);
+    assert!(!window.browser.focus_filter);
     assert_eq!(window.id, WindowId(1));
     assert_eq!(window.title, WindowId(1).title());
+}
+
+#[test]
+fn a_placeholder_window_has_no_pending_browser_filter_focus() {
+    let window = ExtendedWindow::placeholder(WindowId(1));
+
+    assert!(!window.browser.focus_filter);
 }
 
 fn set_input(ctx: &egui::Context, viewport: egui::ViewportId, focused: bool, alt: bool) {

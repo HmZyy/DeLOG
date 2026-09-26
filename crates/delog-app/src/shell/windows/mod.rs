@@ -40,6 +40,7 @@ pub struct WindowBrowser {
     pub filter: BrowserFilterCache,
     pub selection: browser::Selection,
     pub collapsed: bool,
+    pub focus_filter: bool,
 }
 
 #[derive(Clone)]
