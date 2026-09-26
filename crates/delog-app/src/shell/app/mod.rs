@@ -18,7 +18,8 @@ mod viewport_actions;
 mod window_render;
 
 use viewport_actions::{
-    CommandInvocation, ShortcutScope, ViewportAction, collect_shortcut_actions,
+    CommandInvocation, PickerFlow, PickerHost, ShortcutScope, ViewportAction,
+    collect_shortcut_actions, command_palette_host_after_toggle, picker_host_after_close,
 };
 #[cfg(test)]
 use viewport_actions::{SHORTCUT_KEYS, shortcut_for_key};
@@ -339,7 +340,7 @@ struct RunScriptDialog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunKind {
+pub(crate) enum RunKind {
     Script,
     Parser,
     Dataflow,
@@ -536,6 +537,7 @@ pub struct DelogApp {
     load_layout_dialog: LoadLayoutDialog,
     run_script_dialog: RunScriptDialog,
     run_palette_dialog: RunPaletteDialog,
+    picker_host: Option<PickerHost>,
     headless_flows: std::collections::BTreeMap<String, crate::dataflow::headless::HeadlessFlow>,
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
@@ -705,6 +707,7 @@ impl DelogApp {
             load_layout_dialog: LoadLayoutDialog::default(),
             run_script_dialog: RunScriptDialog::default(),
             run_palette_dialog: RunPaletteDialog::default(),
+            picker_host: None,
             headless_flows: std::collections::BTreeMap::new(),
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
@@ -1893,9 +1896,40 @@ impl DelogApp {
         let _ = name;
     }
 
-    fn open_command_palette(&mut self) {
-        self.dynamic_command_catalog.invalidate();
-        self.command_palette.open();
+    fn activate_picker(&mut self, flow: PickerFlow, origin: crate::shell::windows::WindowId) {
+        if !origin.is_main() && !self.windows.iter().any(|window| window.id == origin) {
+            return;
+        }
+        self.close_all_pickers();
+        match flow {
+            PickerFlow::CommandPalette => {
+                self.dynamic_command_catalog.invalidate();
+                self.command_palette.open();
+            }
+            PickerFlow::LoadLayout => {
+                self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
+                self.load_layout_dialog.picker.open();
+            }
+            PickerFlow::RunScript => {
+                #[cfg(feature = "scripting")]
+                {
+                    self.run_script_dialog.scripts =
+                        self.scripts.try_script_names().unwrap_or_default();
+                }
+                self.run_script_dialog.picker.open();
+            }
+            PickerFlow::RunPalette => self.run_palette_dialog.open(),
+        }
+        self.picker_host = Some(PickerHost::new(origin, flow));
+    }
+
+    fn close_all_pickers(&mut self) {
+        self.command_palette.close();
+        self.load_layout_dialog.picker.close();
+        self.run_script_dialog.picker.close();
+        self.run_palette_dialog.kinds.close();
+        self.run_palette_dialog.items.close();
+        self.picker_host = None;
     }
 
     fn command_presentations(
@@ -2194,19 +2228,9 @@ impl DelogApp {
                 }
                 CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
                 CommandId::SaveLayout => self.save_layout_dialog.open = true,
-                CommandId::LoadLayout => {
-                    self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
-                    self.load_layout_dialog.picker.open();
-                }
-                CommandId::RunScript => {
-                    #[cfg(feature = "scripting")]
-                    {
-                        self.run_script_dialog.scripts =
-                            self.scripts.try_script_names().unwrap_or_default();
-                    }
-                    self.run_script_dialog.picker.open();
-                }
-                CommandId::RunPalette => self.open_run_palette(),
+                CommandId::LoadLayout => self.activate_picker(PickerFlow::LoadLayout, origin),
+                CommandId::RunScript => self.activate_picker(PickerFlow::RunScript, origin),
+                CommandId::RunPalette => self.activate_picker(PickerFlow::RunPalette, origin),
                 CommandId::ManageLayouts => self.open_layout_manager(),
                 CommandId::ClearLayout => self.clear_current_layout(),
                 CommandId::ImportLayout => self.spawn_import_layout_dialog(ctx),
@@ -2314,11 +2338,32 @@ impl DelogApp {
                 }
                 self.dispatch_command(invocation, ctx, frame, snapshot, range);
             }
-            ViewportAction::ToggleCommandPalette { origin: _ } => {
-                if self.command_palette.is_open() {
-                    self.command_palette.close();
-                } else {
-                    self.open_command_palette();
+            ViewportAction::ToggleCommandPalette { origin } => {
+                match command_palette_host_after_toggle(self.picker_host, origin) {
+                    Some(_) => self.activate_picker(PickerFlow::CommandPalette, origin),
+                    None => self.close_all_pickers(),
+                }
+            }
+            ViewportAction::Invoke { host, invocation } => {
+                if self.picker_host == Some(host) {
+                    self.close_all_pickers();
+                    self.dispatch_command(invocation, ctx, frame, snapshot, range);
+                }
+            }
+            ViewportAction::ChooseRunKind { host, kind } => {
+                if self.picker_host == Some(host) {
+                    self.open_run_palette_items(kind);
+                }
+            }
+            ViewportAction::RunItem { host, kind, name } => {
+                if self.picker_host == Some(host) {
+                    self.close_all_pickers();
+                    self.run_palette_pick(ctx, kind, &name);
+                }
+            }
+            ViewportAction::PickerClosed { host } => {
+                if picker_host_after_close(self.picker_host, host).is_none() {
+                    self.close_all_pickers();
                 }
             }
         }
@@ -2540,10 +2585,6 @@ impl DelogApp {
         }
     }
 
-    fn open_run_palette(&mut self) {
-        self.run_palette_dialog.open();
-    }
-
     fn run_palette_names(&mut self, kind: RunKind) -> Vec<String> {
         match kind {
             RunKind::Script => {
@@ -2593,7 +2634,124 @@ impl DelogApp {
         }
     }
 
-    fn show_layout_windows(&mut self, ctx: &egui::Context) {
+    fn show_hosted_picker(
+        &mut self,
+        ctx: &egui::Context,
+        window: crate::shell::windows::WindowId,
+        palette_entries: &[command_palette::PaletteEntry],
+    ) -> Option<ViewportAction> {
+        use commands::{AppCommand, CommandId};
+        let host = self.picker_host.filter(|host| host.window == window)?;
+        let invoke = |command| ViewportAction::Invoke {
+            host,
+            invocation: CommandInvocation::new(window, command),
+        };
+        let picked = match host.flow {
+            PickerFlow::CommandPalette => {
+                self.command_palette.show(ctx, palette_entries).map(invoke)
+            }
+            PickerFlow::LoadLayout => {
+                let mut items = vec![crate::ui::palette::PickerItem::new(
+                    LayoutPick::Clear,
+                    CommandId::ClearLayout.spec().label,
+                )];
+                items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
+                    |(index, name)| {
+                        let mut item = crate::ui::palette::PickerItem::new(
+                            LayoutPick::Load(name.clone()),
+                            name.clone(),
+                        );
+                        item.separator_before = index == 0;
+                        item
+                    },
+                ));
+                self.load_layout_dialog
+                    .picker
+                    .show(
+                        ctx,
+                        "load-layout-picker",
+                        "Search layouts…",
+                        &crate::ui::empty::no_saved("layouts"),
+                        &crate::ui::empty::no_matching("layouts"),
+                        &items,
+                    )
+                    .map(|pick| match pick {
+                        LayoutPick::Clear => invoke(AppCommand::Static(CommandId::ClearLayout)),
+                        LayoutPick::Load(name) => invoke(AppCommand::LoadNamedLayout(name)),
+                    })
+            }
+            PickerFlow::RunScript => {
+                let items: Vec<_> = self
+                    .run_script_dialog
+                    .scripts
+                    .iter()
+                    .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
+                    .collect();
+                self.run_script_dialog
+                    .picker
+                    .show(
+                        ctx,
+                        "run-script-picker",
+                        "Search scripts…",
+                        &crate::ui::empty::no_saved("scripts"),
+                        &crate::ui::empty::no_matching("scripts"),
+                        &items,
+                    )
+                    .map(|name| invoke(AppCommand::RunScript(name)))
+            }
+            PickerFlow::RunPalette => self.show_run_palette(ctx, host),
+        };
+        if picked.is_some() {
+            return picked;
+        }
+        let still_open = match host.flow {
+            PickerFlow::CommandPalette => self.command_palette.is_open(),
+            PickerFlow::LoadLayout => self.load_layout_dialog.picker.open,
+            PickerFlow::RunScript => self.run_script_dialog.picker.open,
+            PickerFlow::RunPalette => {
+                self.run_palette_dialog.kinds.open || self.run_palette_dialog.items.open
+            }
+        };
+        (!still_open).then_some(ViewportAction::PickerClosed { host })
+    }
+
+    fn show_run_palette(
+        &mut self,
+        ctx: &egui::Context,
+        host: PickerHost,
+    ) -> Option<ViewportAction> {
+        if self.run_palette_dialog.items.open
+            && let Some(kind) = self.run_palette_dialog.kind
+        {
+            let items = self.run_palette_dialog.name_items();
+            return self
+                .run_palette_dialog
+                .items
+                .show(
+                    ctx,
+                    "run-palette-items",
+                    kind.search_hint(),
+                    &kind.empty_hint(),
+                    &kind.no_match_hint(),
+                    &items,
+                )
+                .map(|name| ViewportAction::RunItem { host, kind, name });
+        }
+        let items = RunPaletteDialog::kind_items();
+        self.run_palette_dialog
+            .kinds
+            .show(
+                ctx,
+                "run-palette-kinds",
+                "Search what to run…",
+                "Nothing to run",
+                &crate::ui::empty::no_matching("actions"),
+                &items,
+            )
+            .map(|kind| ViewportAction::ChooseRunKind { host, kind })
+    }
+
+    fn show_main_dialogs(&mut self, ctx: &egui::Context) {
         if self.save_layout_dialog.open {
             let mut open = self.save_layout_dialog.open;
             egui::Window::new("Save Layout")
@@ -2619,87 +2777,6 @@ impl DelogApp {
                     });
                 });
             self.save_layout_dialog.open &= open;
-        }
-
-        if self.load_layout_dialog.picker.open {
-            let mut items = vec![crate::ui::palette::PickerItem::new(
-                LayoutPick::Clear,
-                commands::CommandId::ClearLayout.spec().label,
-            )];
-            items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
-                |(index, name)| {
-                    let mut item = crate::ui::palette::PickerItem::new(
-                        LayoutPick::Load(name.clone()),
-                        name.clone(),
-                    );
-                    item.separator_before = index == 0;
-                    item
-                },
-            ));
-            match self.load_layout_dialog.picker.show(
-                ctx,
-                "load-layout-picker",
-                "Search layouts…",
-                &crate::ui::empty::no_saved("layouts"),
-                &crate::ui::empty::no_matching("layouts"),
-                &items,
-            ) {
-                Some(LayoutPick::Clear) => self.clear_current_layout(),
-                Some(LayoutPick::Load(name)) => {
-                    let snapshot = self.session.snapshot();
-                    self.load_layout(&name, &snapshot);
-                }
-                None => {}
-            }
-        }
-
-        if self.run_palette_dialog.kinds.open {
-            let items = RunPaletteDialog::kind_items();
-            if let Some(kind) = self.run_palette_dialog.kinds.show(
-                ctx,
-                "run-palette-kinds",
-                "Search what to run…",
-                "Nothing to run",
-                &crate::ui::empty::no_matching("actions"),
-                &items,
-            ) {
-                self.open_run_palette_items(kind);
-            }
-        }
-
-        if self.run_palette_dialog.items.open
-            && let Some(kind) = self.run_palette_dialog.kind
-        {
-            let items = self.run_palette_dialog.name_items();
-            if let Some(name) = self.run_palette_dialog.items.show(
-                ctx,
-                "run-palette-items",
-                kind.search_hint(),
-                &kind.empty_hint(),
-                &kind.no_match_hint(),
-                &items,
-            ) {
-                self.run_palette_pick(ctx, kind, &name);
-            }
-        }
-
-        if self.run_script_dialog.picker.open {
-            let items: Vec<_> = self
-                .run_script_dialog
-                .scripts
-                .iter()
-                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
-                .collect();
-            if let Some(name) = self.run_script_dialog.picker.show(
-                ctx,
-                "run-script-picker",
-                "Search scripts…",
-                &crate::ui::empty::no_saved("scripts"),
-                &crate::ui::empty::no_matching("scripts"),
-                &items,
-            ) {
-                self.run_named_script(&name);
-            }
         }
 
         if self.layout_manager_dialog.open {
@@ -3583,7 +3660,7 @@ impl eframe::App for DelogApp {
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
-        self.show_layout_windows(ui.ctx());
+        self.show_main_dialogs(ui.ctx());
         self.drive_sequences(ui.ctx());
         self.poll_update_checks();
         self.show_update_prompt(ui.ctx());
@@ -3777,17 +3854,17 @@ impl eframe::App for DelogApp {
             }
         }
 
-        if self.command_palette.is_open() {
-            let palette_entries = Self::command_palette_entries(command_presentations);
-            if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
-                self.dispatch_command(
-                    CommandInvocation::main(command),
-                    ui.ctx(),
-                    frame,
-                    &snapshot,
-                    range,
-                );
-            }
+        let palette_entries = if self.command_palette.is_open() {
+            Self::command_palette_entries(command_presentations)
+        } else {
+            Vec::new()
+        };
+        if let Some(action) = self.show_hosted_picker(
+            ui.ctx(),
+            crate::shell::windows::WindowId::MAIN,
+            &palette_entries,
+        ) {
+            self.apply_viewport_action(action, ui.ctx(), frame, &snapshot, range);
         }
     }
 }
