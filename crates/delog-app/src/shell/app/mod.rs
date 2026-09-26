@@ -17,7 +17,11 @@ mod sequences;
 mod viewport_actions;
 mod window_render;
 
-use viewport_actions::{SHORTCUT_KEYS, ShortcutScope, shortcut_for_key};
+use viewport_actions::{
+    CommandInvocation, ShortcutScope, ViewportAction, collect_shortcut_actions,
+};
+#[cfg(test)]
+use viewport_actions::{SHORTCUT_KEYS, shortcut_for_key};
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -48,6 +52,25 @@ fn data_browser_panel(preferred_width: f32) -> egui::Panel {
         .resizable(true)
         .min_size(360.0)
         .default_size(preferred_width)
+}
+
+fn toggle_data_browser_for_window(
+    origin: crate::shell::windows::WindowId,
+    main_collapsed: &mut bool,
+    main_focus_filter: &mut bool,
+    windows: &mut [crate::shell::windows::ExtendedWindow],
+) {
+    if origin.is_main() {
+        *main_collapsed = !*main_collapsed;
+        *main_focus_filter = !*main_collapsed;
+        return;
+    }
+
+    let Some(window) = windows.iter_mut().find(|window| window.id == origin) else {
+        return;
+    };
+    window.browser.collapsed = !window.browser.collapsed;
+    window.browser.focus_filter = !window.browser.collapsed;
 }
 
 fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
@@ -2084,13 +2107,14 @@ impl DelogApp {
 
     fn dispatch_command(
         &mut self,
-        command: commands::AppCommand,
+        invocation: CommandInvocation,
         ctx: &egui::Context,
         frame: &eframe::Frame,
         snapshot: &delog_core::snapshot::StoreSnapshot,
         range: TimeRange,
     ) {
         use commands::{AppCommand, CommandId};
+        let CommandInvocation { origin, command } = invocation;
         match command {
             AppCommand::ShowAbout => self.show_about = true,
             AppCommand::ToggleShellEmphasis => {
@@ -2151,8 +2175,12 @@ impl DelogApp {
                     ),
                 ),
                 CommandId::ToggleDataBrowser => {
-                    self.browser_collapsed = !self.browser_collapsed;
-                    self.browser_focus_filter = !self.browser_collapsed;
+                    toggle_data_browser_for_window(
+                        origin,
+                        &mut self.browser_collapsed,
+                        &mut self.browser_focus_filter,
+                        &mut self.windows,
+                    );
                 }
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
@@ -2265,6 +2293,34 @@ impl DelogApp {
                     self.markers.add_at(self.playback.t_us);
                 }
             },
+        }
+    }
+
+    fn apply_viewport_action(
+        &mut self,
+        action: ViewportAction,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        range: TimeRange,
+    ) {
+        match action {
+            ViewportAction::Shortcut(invocation) => {
+                if let commands::AppCommand::Static(command) = &invocation.command
+                    && let Some(dock) = dock_for_command(*command)
+                {
+                    self.open_dock(dock);
+                    return;
+                }
+                self.dispatch_command(invocation, ctx, frame, snapshot, range);
+            }
+            ViewportAction::ToggleCommandPalette { origin: _ } => {
+                if self.command_palette.is_open() {
+                    self.command_palette.close();
+                } else {
+                    self.open_command_palette();
+                }
+            }
         }
     }
 
@@ -3113,49 +3169,25 @@ impl eframe::App for DelogApp {
             .inner;
         drop(ui_menu_timer);
         for command in header_output.commands {
-            self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+            self.dispatch_command(
+                CommandInvocation::main(command),
+                ui.ctx(),
+                frame,
+                &snapshot,
+                range,
+            );
         }
         if header_output.refresh_dynamic_catalog {
             self.dynamic_command_catalog.invalidate();
         }
 
-        let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
-        let palette_shortcut = ui.ctx().input(|input| {
-            input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::P)
-        });
-        if command_palette::should_toggle_palette(palette_shortcut, wants_keyboard) {
-            if self.command_palette.is_open() {
-                self.command_palette.close();
-            } else {
-                self.open_command_palette();
-            }
-        }
-
-        if !self.command_palette.is_open() {
-            use commands::AppCommand;
-            let shortcuts = ui.ctx().input(|input| {
-                SHORTCUT_KEYS
-                    .iter()
-                    .copied()
-                    .filter(|key| input.key_pressed(*key))
-                    .filter_map(|key| shortcut_for_key(key, input.modifiers.command))
-                    .filter(|(_, scope)| scope.allows(wants_keyboard))
-                    .map(|(command, _)| command)
-                    .collect::<Vec<_>>()
-            });
-            for command in shortcuts {
-                if let Some(dock) = dock_for_command(command) {
-                    self.open_dock(dock);
-                } else {
-                    self.dispatch_command(
-                        AppCommand::Static(command),
-                        ui.ctx(),
-                        frame,
-                        &snapshot,
-                        range,
-                    );
-                }
-            }
+        let shortcut_actions = collect_shortcut_actions(
+            ui.ctx(),
+            crate::shell::windows::WindowId::MAIN,
+            self.command_palette.is_open(),
+        );
+        for action in shortcut_actions {
+            self.apply_viewport_action(action, ui.ctx(), frame, &snapshot, range);
         }
 
         let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
@@ -3748,7 +3780,13 @@ impl eframe::App for DelogApp {
         if self.command_palette.is_open() {
             let palette_entries = Self::command_palette_entries(command_presentations);
             if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
-                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+                self.dispatch_command(
+                    CommandInvocation::main(command),
+                    ui.ctx(),
+                    frame,
+                    &snapshot,
+                    range,
+                );
             }
         }
     }
