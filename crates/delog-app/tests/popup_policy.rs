@@ -302,7 +302,7 @@ fn view_panels_menu_orders_docks_and_function_keys_focus_them() {
     ] {
         assert!(VIEWPORT_ACTIONS_SOURCE.contains(key));
     }
-    assert!(APP_SOURCE.contains("if let Some(dock) = dock_for_command(command)"));
+    assert!(APP_SOURCE.contains("let Some(dock) = dock_for_command(*command)"));
     assert!(APP_SOURCE.contains("self.open_dock(dock);"));
     assert!(APP_SOURCE.contains("self.toggle_dock(AppDockTab::Diagnostics)"));
 }
@@ -778,7 +778,7 @@ fn context_header_orders_the_application_menus() {
     assert!(!menu_bar.contains("\"Workspace\""));
     assert!(!menu_bar.contains("\"Extensions\""));
     assert!(!menu_bar.contains("Ctrl+K  Commands"));
-    assert!(APP_SOURCE.contains("command_palette::should_toggle_palette"));
+    assert!(VIEWPORT_ACTIONS_SOURCE.contains("command_palette::should_toggle_palette"));
 }
 
 #[test]
