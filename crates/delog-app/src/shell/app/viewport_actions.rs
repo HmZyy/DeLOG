@@ -123,6 +123,25 @@ pub(crate) enum ViewportAction {
     },
 }
 
+impl ViewportAction {
+    pub(crate) fn origin(&self) -> WindowId {
+        match self {
+            Self::Shortcut(invocation) => invocation.origin,
+            Self::ToggleCommandPalette { origin } => *origin,
+            Self::Invoke { host, .. }
+            | Self::PickerClosed { host }
+            | Self::ChooseRunKind { host, .. }
+            | Self::RunItem { host, .. } => host.window,
+        }
+    }
+}
+
+pub(crate) fn discard_picker_actions_from(actions: &mut Vec<ViewportAction>, closed: WindowId) {
+    actions.retain(|action| {
+        matches!(action, ViewportAction::Shortcut(_)) || action.origin() != closed
+    });
+}
+
 pub(crate) fn command_palette_host_after_toggle(
     current: Option<PickerHost>,
     origin: WindowId,
@@ -225,6 +244,55 @@ mod tests {
             |ctx| actions = collect_shortcut_actions(ctx, origin, false),
         );
         actions
+    }
+
+    #[test]
+    fn closing_a_picker_host_discards_only_picker_actions_for_that_host() {
+        let closed = WindowId(4);
+        let host = PickerHost::new(closed, PickerFlow::RunPalette);
+        let main_host = PickerHost::new(WindowId::MAIN, PickerFlow::CommandPalette);
+        let global = ViewportAction::Shortcut(CommandInvocation::new(
+            closed,
+            AppCommand::Static(CommandId::EqualizePlots),
+        ));
+        let main_shortcut = ViewportAction::Shortcut(CommandInvocation::main(AppCommand::Static(
+            CommandId::TogglePlayback,
+        )));
+        let main_invoke = ViewportAction::Invoke {
+            host: main_host,
+            invocation: CommandInvocation::main(AppCommand::FitAll),
+        };
+        let other_toggle = ViewportAction::ToggleCommandPalette {
+            origin: WindowId(5),
+        };
+        let mut actions = vec![
+            main_shortcut.clone(),
+            global.clone(),
+            ViewportAction::ToggleCommandPalette { origin: closed },
+            main_invoke.clone(),
+            ViewportAction::Invoke {
+                host,
+                invocation: CommandInvocation::new(closed, AppCommand::FitAll),
+            },
+            ViewportAction::ChooseRunKind {
+                host,
+                kind: RunKind::Script,
+            },
+            ViewportAction::RunItem {
+                host,
+                kind: RunKind::Script,
+                name: "demo".to_owned(),
+            },
+            ViewportAction::PickerClosed { host },
+            other_toggle.clone(),
+        ];
+
+        discard_picker_actions_from(&mut actions, closed);
+
+        assert_eq!(
+            actions,
+            vec![main_shortcut, global, main_invoke, other_toggle]
+        );
     }
 
     #[test]
