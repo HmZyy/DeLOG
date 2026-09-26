@@ -67,6 +67,110 @@ fn union_fields_spans_every_window_without_duplicates() {
 }
 
 #[test]
+fn legend_controls_span_the_main_and_extended_windows() {
+    let mut main = Workspace::new();
+    let main_root = main.tree.root().unwrap();
+    main.split_plot(
+        main_root,
+        crate::shell::workspace::SplitDirection::Horizontal,
+    );
+    let mut windows = vec![window_with(1, &[]), window_with(2, &[])];
+    let extended_root = windows[0].workspace.tree.root().unwrap();
+    windows[0].workspace.split_plot(
+        extended_root,
+        crate::shell::workspace::SplitDirection::Vertical,
+    );
+
+    assert!(all_plot_legends_visible(&main, &windows));
+    windows[1]
+        .workspace
+        .plot_panes_mut()
+        .next()
+        .unwrap()
+        .show_legend = false;
+    assert!(!all_plot_legends_visible(&main, &windows));
+
+    set_all_plot_legends(&mut main, &mut windows, true);
+    assert!(main.plot_panes().all(|pane| pane.show_legend));
+    assert!(
+        windows
+            .iter()
+            .flat_map(|window| window.workspace.plot_panes())
+            .all(|pane| pane.show_legend)
+    );
+
+    set_all_plot_legends(&mut main, &mut windows, false);
+    assert!(main.plot_panes().all(|pane| !pane.show_legend));
+    assert!(
+        windows
+            .iter()
+            .flat_map(|window| window.workspace.plot_panes())
+            .all(|pane| !pane.show_legend)
+    );
+}
+
+#[test]
+fn a_new_window_inherits_the_global_legend_default() {
+    let mut windows = Vec::new();
+    let mut next_id = 1;
+
+    let id = open_window(&mut windows, &mut next_id, None, false);
+
+    assert_eq!(id, WindowId(1));
+    assert!(!windows[0].workspace.default_show_legend);
+    assert!(
+        windows[0]
+            .workspace
+            .plot_panes()
+            .all(|pane| !pane.show_legend)
+    );
+}
+
+#[test]
+fn equalizing_plot_heights_spans_the_main_and_extended_windows() {
+    fn make_unequal(workspace: &mut Workspace) -> (egui_tiles::TileId, Vec<egui_tiles::TileId>) {
+        let first = workspace.tree.root().unwrap();
+        workspace.split_plot(first, crate::shell::workspace::SplitDirection::Vertical);
+        let root = workspace.tree.root().unwrap();
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get_mut(root)
+        else {
+            panic!("split workspace should have a linear root");
+        };
+        let children = linear.children.clone();
+        linear.shares.set_share(children[0], 5.0);
+        linear.shares.set_share(children[1], 2.0);
+        (root, children)
+    }
+
+    fn assert_equal(
+        workspace: &Workspace,
+        root: egui_tiles::TileId,
+        children: &[egui_tiles::TileId],
+    ) {
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(linear))) =
+            workspace.tree.tiles.get(root)
+        else {
+            panic!("split workspace should keep its linear root");
+        };
+        assert_eq!(linear.shares[children[0]], 1.0);
+        assert_eq!(linear.shares[children[1]], 1.0);
+    }
+
+    let mut main = Workspace::new();
+    let (main_root, main_children) = make_unequal(&mut main);
+    let mut windows = vec![window_with(1, &[]), window_with(2, &[])];
+    let (first_root, first_children) = make_unequal(&mut windows[0].workspace);
+    let (second_root, second_children) = make_unequal(&mut windows[1].workspace);
+
+    equalize_plot_heights(&mut main, &mut windows);
+
+    assert_equal(&main, main_root, &main_children);
+    assert_equal(&windows[0].workspace, first_root, &first_children);
+    assert_equal(&windows[1].workspace, second_root, &second_children);
+}
+
+#[test]
 fn union_fields_dedupes_a_trace_plotted_in_two_panes() {
     let mut workspace = Workspace::new();
     let first = workspace.tree.root().unwrap();

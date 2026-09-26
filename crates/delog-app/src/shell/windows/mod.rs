@@ -108,15 +108,38 @@ pub fn open_window(
     windows: &mut Vec<ExtendedWindow>,
     next_window_id: &mut u64,
     title: Option<String>,
+    show_legend: bool,
 ) -> WindowId {
     let id = WindowId(*next_window_id);
     *next_window_id += 1;
     let mut window = ExtendedWindow::new(id);
+    window.workspace.set_all_plot_legends(show_legend);
     if let Some(title) = title {
         window.title = title;
     }
     windows.push(window);
     id
+}
+
+pub fn all_plot_legends_visible(main: &Workspace, windows: &[ExtendedWindow]) -> bool {
+    main.all_plot_legends_visible()
+        && windows
+            .iter()
+            .all(|window| window.workspace.all_plot_legends_visible())
+}
+
+pub fn set_all_plot_legends(main: &mut Workspace, windows: &mut [ExtendedWindow], visible: bool) {
+    main.set_all_plot_legends(visible);
+    for window in windows {
+        window.workspace.set_all_plot_legends(visible);
+    }
+}
+
+pub fn equalize_plot_heights(main: &mut Workspace, windows: &mut [ExtendedWindow]) {
+    main.equalize_plot_heights();
+    for window in windows {
+        window.workspace.equalize_plot_heights();
+    }
 }
 
 pub fn union_fields(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<FieldId> {
