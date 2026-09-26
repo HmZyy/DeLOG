@@ -1,3 +1,4 @@
+use crate::shell::app::RunKind;
 use crate::shell::app::commands::{AppCommand, CommandId};
 use crate::shell::windows::WindowId;
 
@@ -78,10 +79,67 @@ impl CommandInvocation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PickerFlow {
+    CommandPalette,
+    LoadLayout,
+    RunScript,
+    RunPalette,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PickerHost {
+    pub(crate) window: WindowId,
+    pub(crate) flow: PickerFlow,
+}
+
+impl PickerHost {
+    pub(crate) fn new(window: WindowId, flow: PickerFlow) -> Self {
+        Self { window, flow }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ViewportAction {
     Shortcut(CommandInvocation),
-    ToggleCommandPalette { origin: WindowId },
+    ToggleCommandPalette {
+        origin: WindowId,
+    },
+    Invoke {
+        host: PickerHost,
+        invocation: CommandInvocation,
+    },
+    PickerClosed {
+        host: PickerHost,
+    },
+    ChooseRunKind {
+        host: PickerHost,
+        kind: RunKind,
+    },
+    RunItem {
+        host: PickerHost,
+        kind: RunKind,
+        name: String,
+    },
+}
+
+pub(crate) fn command_palette_host_after_toggle(
+    current: Option<PickerHost>,
+    origin: WindowId,
+) -> Option<PickerHost> {
+    let requested = PickerHost::new(origin, PickerFlow::CommandPalette);
+    (current != Some(requested)).then_some(requested)
+}
+
+pub(crate) fn picker_host_after_close(
+    current: Option<PickerHost>,
+    closed: PickerHost,
+) -> Option<PickerHost> {
+    if current == Some(closed) {
+        None
+    } else {
+        current
+    }
 }
 
 pub(crate) fn collect_shortcut_actions(
@@ -167,6 +225,59 @@ mod tests {
             |ctx| actions = collect_shortcut_actions(ctx, origin, false),
         );
         actions
+    }
+
+    #[test]
+    fn same_host_palette_toggle_closes_it() {
+        let host = PickerHost::new(WindowId(1), PickerFlow::CommandPalette);
+
+        assert_eq!(
+            command_palette_host_after_toggle(Some(host), WindowId(1)),
+            None
+        );
+        assert_eq!(
+            command_palette_host_after_toggle(None, WindowId(1)),
+            Some(host)
+        );
+    }
+
+    #[test]
+    fn palette_toggle_from_another_window_moves_the_host() {
+        let host = PickerHost::new(WindowId(1), PickerFlow::CommandPalette);
+
+        assert_eq!(
+            command_palette_host_after_toggle(Some(host), WindowId(2)),
+            Some(PickerHost::new(WindowId(2), PickerFlow::CommandPalette))
+        );
+        assert_eq!(
+            command_palette_host_after_toggle(Some(host), WindowId::MAIN),
+            Some(PickerHost::new(WindowId::MAIN, PickerFlow::CommandPalette))
+        );
+    }
+
+    #[test]
+    fn opening_a_different_picker_replaces_the_previous_host() {
+        let load_layout = PickerHost::new(WindowId(1), PickerFlow::LoadLayout);
+
+        assert_eq!(
+            command_palette_host_after_toggle(Some(load_layout), WindowId(1)),
+            Some(PickerHost::new(WindowId(1), PickerFlow::CommandPalette))
+        );
+    }
+
+    #[test]
+    fn stale_picker_close_does_not_close_a_replacement_host() {
+        let replacement = PickerHost::new(WindowId(2), PickerFlow::LoadLayout);
+        let former = PickerHost::new(WindowId(1), PickerFlow::CommandPalette);
+
+        assert_eq!(
+            picker_host_after_close(Some(replacement), former),
+            Some(replacement)
+        );
+        assert_eq!(
+            picker_host_after_close(Some(replacement), replacement),
+            None
+        );
     }
 
     #[test]
