@@ -6,9 +6,8 @@ use delog_api::control::{AccessMode, AuthorizedControlHost};
 use delog_core::ingest::IngestSender;
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_remote::{
-    API_MAJOR, API_MAX_MINOR, ClientId, ControlLimits, DiscoveryError, LeaseId, OwnerRegistry,
-    RemoteConfig, RemoteServer, RemoteServerHandle, RemoteServices, ServerStatus, ShutdownError,
-    StartError, UploadConfig, UploadLimits,
+    ClientId, ControlLimits, DiscoveryError, LeaseId, OwnerRegistry, RemoteConfig, RemoteServer,
+    RemoteServerHandle, RemoteServices, ShutdownError, StartError, UploadConfig, UploadLimits,
 };
 
 mod settings_tab;
@@ -81,10 +80,6 @@ pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
-}
-
-pub(crate) fn api_version_label() -> String {
-    format!("v{API_MAJOR}.{API_MAX_MINOR}")
 }
 
 pub(crate) fn instance_label(snapshot: &StoreSnapshot) -> String {
@@ -265,10 +260,6 @@ impl ExternalApiController {
         self.handle
             .as_ref()
             .map(|handle| handle.upload_staging_dir().to_owned())
-    }
-
-    pub fn server_status(&self) -> Option<ServerStatus> {
-        self.handle.as_ref().map(|handle| handle.status())
     }
 
     pub fn revoke_client(&self, client: &ClientId) -> bool {

@@ -3,28 +3,17 @@ use std::sync::Arc;
 use delog_api::control::AccessMode;
 use delog_core::ingest::IngestSender;
 use delog_core::snapshot::{DataStore, StoreSnapshot};
-use delog_remote::{ClientId, LeaseId, RemoteConfig, ServerStatus};
+use delog_remote::{ClientId, LeaseId, RemoteConfig};
 
 use super::{
-    ExternalApiController, ExternalApiLimits, ExternalApiStatus, MIB, api_version_label,
-    build_config, error_chain,
+    ExternalApiController, ExternalApiLimits, ExternalApiStatus, MIB, build_config, error_chain,
 };
 use crate::ui::logging::LogLevel;
 
 pub(crate) const FULL_ACCESS_WARNING: &str = "Full control lets connected clients modify or remove manual state, including plots, traces, markers, vehicles, layouts, and playback.";
 
-pub(crate) const LIMITS_NOTE: &str = "Changes apply the next time access is enabled.";
-
 pub(crate) const FULL_ACCESS_ACTIVE: &str =
     "Full control is active: connected clients may modify or remove manual state.";
-
-fn counted(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("{count} {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
 
 pub(crate) fn access_label(access: AccessMode) -> &'static str {
     match access {
@@ -42,56 +31,6 @@ struct Actions {
     access: Option<AccessMode>,
     confirm_full: bool,
     cancel_full: bool,
-}
-
-fn client_rows(ui: &mut egui::Ui, status: &ServerStatus, actions: &mut Actions) {
-    if status.clients.is_empty() {
-        ui.weak("No clients connected");
-        return;
-    }
-    ui.vertical(|ui| {
-        for client in &status.clients {
-            ui.horizontal(|ui| {
-                ui.label(&client.owner_name);
-                ui.weak(access_label(status.access));
-                if ui.button("Revoke").clicked() {
-                    actions.revoke_client = Some(client.client_id.clone());
-                }
-            });
-        }
-    });
-}
-
-fn lease_rows(ui: &mut egui::Ui, status: &ServerStatus, actions: &mut Actions) {
-    if status.leases.is_empty() {
-        ui.weak("No active leases");
-        return;
-    }
-    ui.vertical(|ui| {
-        for lease in &status.leases {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} - {} active readers",
-                    lease.id.as_str(),
-                    lease.active_readers
-                ));
-                if ui.button("Revoke").clicked() {
-                    actions.revoke_lease = Some(lease.id.clone());
-                }
-            });
-        }
-    });
-}
-
-fn activity(status: &ServerStatus) -> String {
-    [
-        counted(status.clients.len(), "client"),
-        counted(status.leases.len(), "lease"),
-        counted(status.active_downloads, "download"),
-        counted(status.active_uploads, "upload"),
-        counted(status.queued_controls, "queued control"),
-    ]
-    .join(", ")
 }
 
 struct LimitRow<'a, T> {
@@ -313,7 +252,6 @@ impl ExternalApiController {
     ) -> Vec<(LogLevel, String)> {
         let mut logs = Vec::new();
         let status = self.status();
-        let server_status = self.server_status();
         let access = self.access_mode();
         let running_config = self.running_config().cloned();
         let last_error = self.last_error().map(str::to_owned);
@@ -340,10 +278,6 @@ impl ExternalApiController {
                         }
                     }
                 });
-                ui.end_row();
-
-                ui.label("API version");
-                ui.label(api_version_label());
                 ui.end_row();
 
                 if let Some(error) = &last_error {
@@ -376,9 +310,7 @@ impl ExternalApiController {
                 }
 
                 if let ExternalApiStatus::Running(running) = &status {
-                    ui.label("Instance ID").on_hover_text(
-                        "Pass this ID to DeLOG.connect() to reach this window. The access token is never shown.",
-                    );
+                    ui.label("Instance ID").on_hover_text("Pass this ID to DeLOG.connect() to reach this window.");
                     ui.horizontal(|ui| {
                         ui.monospace(&running.instance_id);
                         if ui.button("Copy").clicked() {
@@ -388,23 +320,6 @@ impl ExternalApiController {
                     ui.end_row();
                 }
 
-                if let Some(server_status) = &server_status {
-                    ui.label("Activity");
-                    ui.label(activity(server_status));
-                    ui.end_row();
-
-                    ui.label("Clients");
-                    client_rows(ui, server_status, &mut actions);
-                    ui.end_row();
-
-                    ui.label("Snapshot leases");
-                    lease_rows(ui, server_status, &mut actions);
-                    ui.end_row();
-                }
-
-                ui.label("Limits");
-                ui.weak(LIMITS_NOTE);
-                ui.end_row();
                 limit_rows(ui, &mut self.limits, running_config.as_ref());
             });
 
