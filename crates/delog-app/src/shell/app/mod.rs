@@ -14,7 +14,10 @@ pub mod inspector;
 #[cfg(all(test, feature = "scripting"))]
 mod sequence_tests;
 mod sequences;
+mod viewport_actions;
 mod window_render;
+
+use viewport_actions::{SHORTCUT_KEYS, ShortcutScope, shortcut_for_key};
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -4713,27 +4716,6 @@ fn parser_label(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-const SHORTCUT_KEYS: &[egui::Key] = &[
-    egui::Key::F1,
-    egui::Key::F2,
-    egui::Key::F3,
-    egui::Key::F9,
-    egui::Key::F12,
-    egui::Key::Space,
-    egui::Key::Home,
-    egui::Key::End,
-    egui::Key::ArrowLeft,
-    egui::Key::ArrowRight,
-    egui::Key::S,
-    egui::Key::L,
-    egui::Key::R,
-    egui::Key::M,
-    egui::Key::E,
-    egui::Key::T,
-    egui::Key::O,
-    egui::Key::Equals,
-];
-
 fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
     use commands::CommandId;
     match command {
@@ -4745,47 +4727,6 @@ fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
         #[cfg(not(feature = "scripting"))]
         CommandId::OpenScripting => None,
         CommandId::OpenLogging => Some(AppDockTab::Logging),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ShortcutScope {
-    Anywhere,
-    WhenKeyboardIsFree,
-}
-
-impl ShortcutScope {
-    fn allows(self, wants_keyboard: bool) -> bool {
-        matches!(self, Self::Anywhere) || !wants_keyboard
-    }
-}
-
-fn shortcut_for_key(
-    key: egui::Key,
-    command_modifier: bool,
-) -> Option<(commands::CommandId, ShortcutScope)> {
-    use ShortcutScope::{Anywhere, WhenKeyboardIsFree};
-    use commands::CommandId;
-    match (key, command_modifier) {
-        (egui::Key::S, true) => Some((CommandId::SaveLayout, Anywhere)),
-        (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
-        (egui::Key::R, true) => Some((CommandId::RunPalette, Anywhere)),
-        (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
-        (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),
-        (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
-        (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
-        (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
-        (egui::Key::F3, _) => Some((CommandId::OpenMarkers, Anywhere)),
-        (egui::Key::F9, _) => Some((CommandId::OpenScripting, Anywhere)),
-        (egui::Key::F12, _) => Some((CommandId::OpenLogging, Anywhere)),
-        (egui::Key::Space, _) => Some((CommandId::TogglePlayback, WhenKeyboardIsFree)),
-        (egui::Key::Home, _) => Some((CommandId::JumpStart, WhenKeyboardIsFree)),
-        (egui::Key::End, _) => Some((CommandId::JumpEnd, WhenKeyboardIsFree)),
-        (egui::Key::ArrowLeft, _) => Some((CommandId::StepLeft, WhenKeyboardIsFree)),
-        (egui::Key::ArrowRight, _) => Some((CommandId::StepRight, WhenKeyboardIsFree)),
-        (egui::Key::M, _) => Some((CommandId::AddMarker, WhenKeyboardIsFree)),
-        (egui::Key::Equals, _) => Some((CommandId::EqualizePlots, WhenKeyboardIsFree)),
         _ => None,
     }
 }
