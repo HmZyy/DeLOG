@@ -26,9 +26,11 @@ pub enum EndpointKind {
     Serial,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EndpointError {
+    #[error("serial path is required")]
     EmptySerialPath,
+    #[error("baud must be greater than zero")]
     InvalidBaud,
 }
 
@@ -81,20 +83,21 @@ impl fmt::Display for EndpointKind {
     }
 }
 
-impl fmt::Display for EndpointError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptySerialPath => write!(f, "serial path is required"),
-            Self::InvalidBaud => write!(f, "baud must be greater than zero"),
-        }
-    }
-}
-
-impl std::error::Error for EndpointError {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_errors_keep_existing_messages() {
+        let empty = EndpointError::EmptySerialPath;
+        assert_eq!(empty.clone(), empty);
+        assert_eq!(empty.to_string(), "serial path is required");
+        assert!(std::error::Error::source(&empty).is_none());
+
+        let baud = EndpointError::InvalidBaud;
+        assert_eq!(baud.to_string(), "baud must be greater than zero");
+        assert!(std::error::Error::source(&baud).is_none());
+    }
 
     #[test]
     fn endpoint_kind_labels_cover_all_modes() {
