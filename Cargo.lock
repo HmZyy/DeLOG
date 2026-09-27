@@ -1151,6 +1151,7 @@ dependencies = [
  "delog-parsers",
  "mavlink",
  "serialport",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
