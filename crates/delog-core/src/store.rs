@@ -1,7 +1,5 @@
 //! Immutable topic store spine.
 
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
 
 use crate::chunk::Chunk;
@@ -23,9 +21,11 @@ pub struct TopicStore {
     monotonic: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TopicStoreError {
+    #[error("chunk schema mismatch: expected {expected} columns, got {actual}")]
     ChunkSchemaMismatch { expected: usize, actual: usize },
+    #[error("topic row count overflow")]
     RowCountOverflow,
 }
 
@@ -124,20 +124,6 @@ fn union_with_chunk(acc: Option<TimeRange>, chunk: &Chunk) -> TimeRange {
         None => chunk_range,
     }
 }
-
-impl fmt::Display for TopicStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ChunkSchemaMismatch { expected, actual } => write!(
-                f,
-                "chunk schema mismatch: expected {expected} columns, got {actual}"
-            ),
-            Self::RowCountOverflow => write!(f, "topic row count overflow"),
-        }
-    }
-}
-
-impl Error for TopicStoreError {}
 
 fn validate_chunk(schema: &TopicSchema, chunk: &Chunk) -> Result<(), TopicStoreError> {
     if chunk.cols.len() != schema.len() {
