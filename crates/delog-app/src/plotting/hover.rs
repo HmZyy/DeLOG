@@ -192,7 +192,7 @@ fn show_tooltip(
                 }
                 for row in rows {
                     ui.horizontal(|ui| {
-                        color_swatch(ui, row.color);
+                        crate::ui::components::color_swatch(ui, row.color, 10.0);
                         let unit = row.unit.as_deref().unwrap_or("");
                         let value = format_value(row.value);
                         if show_field_name {
@@ -211,11 +211,6 @@ fn show_tooltip(
                 }
             });
         });
-}
-
-fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 #[allow(clippy::too_many_arguments)]

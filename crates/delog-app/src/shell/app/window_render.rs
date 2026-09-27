@@ -25,6 +25,10 @@ impl DelogApp {
         let mut windows = std::mem::take(&mut self.windows);
         let model = self.browser_model.take();
         let mut closed = Vec::new();
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "the indexed slot is restored after the viewport callback"
+        )]
         for index in 0..windows.len() {
             let id = windows[index].id;
             let mut window =

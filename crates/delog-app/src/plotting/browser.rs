@@ -550,6 +550,10 @@ pub fn filter_id(salt: egui::Id) -> egui::Id {
     salt.with("data_browser_filter")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "egui entry point keeps borrowed UI and model state without allocation"
+)]
 pub fn ui(
     ui: &mut egui::Ui,
     salt: egui::Id,
