@@ -180,17 +180,15 @@ impl DelogApp {
             if let Some(outcome) = outcome {
                 if matches!(&outcome, StepOutcome::Failed(_))
                     && matches!(active.operation, ActiveOperation::Flow)
-                {
-                    if let Some(mut owned) = sequences
+                    && let Some(mut owned) = sequences
                         .flows
                         .remove(&(active.sequence.clone(), active.request.step.id))
-                    {
-                        sequences
-                            .cleanup
-                            .entry(active.sequence.clone())
-                            .or_default()
-                            .push(owned.flow.controller.stop_owned(&sender));
-                    }
+                {
+                    sequences
+                        .cleanup
+                        .entry(active.sequence.clone())
+                        .or_default()
+                        .push(owned.flow.controller.stop_owned(&sender));
                 }
                 sequences.finish(&active.sequence, active.request.token, outcome);
             } else {

@@ -503,8 +503,8 @@ mod tests {
         }
 
         let mut visible = |row: i64| {
-            let mut output = render(&ctx, &mut windows, &snapshot, Some(row * 100), Vec::new()).0;
-            output = render(&ctx, &mut windows, &snapshot, Some(row * 100), Vec::new()).0;
+            let _ = render(&ctx, &mut windows, &snapshot, Some(row * 100), Vec::new());
+            let output = render(&ctx, &mut windows, &snapshot, Some(row * 100), Vec::new()).0;
             let wanted = format!("line-{row:04}");
             let lines: Vec<String> = painted(&output)
                 .iter()
@@ -595,7 +595,7 @@ mod tests {
         windows.open(&snapshot, field);
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let fill = ctx.style().visuals.selection.bg_fill;
+        let fill = ctx.global_style().visuals.selection.bg_fill;
 
         let unfiltered = selection_bands(&render_filtered(&ctx, &mut windows, &snapshot, ""), fill);
         let output = render_filtered(&ctx, &mut windows, &snapshot, "take");
@@ -618,7 +618,7 @@ mod tests {
         windows.open(&snapshot, field);
         let ctx = egui::Context::default();
         crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
-        let fill = ctx.style().visuals.selection.bg_fill;
+        let fill = ctx.global_style().visuals.selection.bg_fill;
 
         let unfiltered = selection_bands(&render_filtered(&ctx, &mut windows, &snapshot, ""), fill);
         let output = render_filtered(&ctx, &mut windows, &snapshot, "arm");

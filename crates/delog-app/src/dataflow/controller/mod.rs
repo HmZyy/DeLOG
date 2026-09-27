@@ -296,7 +296,7 @@ impl DataFlowController {
     }
 
     pub fn apply(&mut self, command: GraphCommand) -> Result<(), String> {
-        let inverse = apply(&mut self.graph, command).map_err(|error| format!("{error:?}"))?;
+        let inverse = apply(&mut self.graph, command).map_err(|error| error.to_string())?;
         push_bounded(&mut self.undo, inverse);
         self.redo.clear();
         self.dirty = true;

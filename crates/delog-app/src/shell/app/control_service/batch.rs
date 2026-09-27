@@ -40,29 +40,35 @@ pub(super) fn apply_batch(
     let mut vehicle_revision = *control.vehicle_revision;
     let mut traj_dirty = *control.traj_dirty;
     let mut shadow_caches = CacheManager::new();
-    let mut shadow = AppControl {
-        markers: &mut markers,
-        workspace: &mut workspace,
-        windows: &mut windows,
-        playback: &mut playback,
-        next_window_id: &mut next_window_id,
-        caches: &mut shadow_caches,
-        snapshot: control.snapshot,
-        vehicles: &mut vehicles,
-        next_vehicle_id: &mut next_vehicle_id,
-        vehicle_revision: &mut vehicle_revision,
-        traj_dirty: &mut traj_dirty,
-        vehicle_profiles: control.vehicle_profiles,
-    };
+    let shadow_result = {
+        let mut shadow = AppControl {
+            markers: &mut markers,
+            workspace: &mut workspace,
+            windows: &mut windows,
+            playback: &mut playback,
+            next_window_id: &mut next_window_id,
+            caches: &mut shadow_caches,
+            snapshot: control.snapshot,
+            vehicles: &mut vehicles,
+            next_vehicle_id: &mut next_vehicle_id,
+            vehicle_revision: &mut vehicle_revision,
+            traj_dirty: &mut traj_dirty,
+            vehicle_profiles: control.vehicle_profiles,
+        };
 
-    for (index, request) in requests.into_iter().enumerate() {
-        if let Err(error) = apply_one(&mut shadow, request) {
-            drop(shadow);
-            rollback_terminal_commit(control, terminal_commit.as_ref());
-            return Err(format!("batch request {index} failed: {error}"));
-        }
+        requests
+            .into_iter()
+            .enumerate()
+            .try_for_each(|(index, request)| {
+                apply_one(&mut shadow, request)
+                    .map(|_| ())
+                    .map_err(|error| format!("batch request {index} failed: {error}"))
+            })
+    };
+    if let Err(error) = shadow_result {
+        rollback_terminal_commit(control, terminal_commit.as_ref());
+        return Err(error);
     }
-    drop(shadow);
 
     *control.markers = markers;
     *control.workspace = workspace;

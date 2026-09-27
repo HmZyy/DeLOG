@@ -284,7 +284,7 @@ impl DataFlowEditor {
                 self.controller.graph.name.clone_from(&self.name_edit);
                 self.controller.dirty = true;
             }
-            if icon_btn_enabled(
+            if crate::ui::components::icon_button_enabled(
                 ui,
                 !self.name_edit.is_empty(),
                 crate::ui::icons::save(),
@@ -295,7 +295,7 @@ impl DataFlowEditor {
                 action = Some(EditorAction::Save);
             }
             ui.add_space(8.0);
-            if icon_btn_enabled(
+            if crate::ui::components::icon_button_enabled(
                 ui,
                 self.controller.can_undo(),
                 crate::ui::icons::rotate_ccw(),
@@ -305,7 +305,7 @@ impl DataFlowEditor {
             {
                 self.controller.undo();
             }
-            if icon_btn_enabled(
+            if crate::ui::components::icon_button_enabled(
                 ui,
                 self.controller.can_redo(),
                 crate::ui::icons::rotate_cw(),
@@ -317,7 +317,7 @@ impl DataFlowEditor {
             }
             ui.add_space(8.0);
             let has_selection = !self.controller.selection.is_empty();
-            if icon_btn_enabled(
+            if crate::ui::components::icon_button_enabled(
                 ui,
                 has_selection,
                 crate::ui::icons::copy(),
@@ -330,7 +330,7 @@ impl DataFlowEditor {
                     logs.push((LogLevel::Error, format!("Duplicate failed: {error}")));
                 }
             }
-            if icon_btn_enabled(
+            if crate::ui::components::icon_button_enabled(
                 ui,
                 has_selection,
                 crate::ui::icons::trash(),
@@ -351,7 +351,14 @@ impl DataFlowEditor {
                 } else {
                     "Run"
                 };
-                if icon_btn_enabled(ui, true, crate::ui::icons::play(), tooltip).clicked() {
+                if crate::ui::components::icon_button_enabled(
+                    ui,
+                    true,
+                    crate::ui::icons::play(),
+                    tooltip,
+                )
+                .clicked()
+                {
                     action = Some(EditorAction::Run);
                 }
             }
@@ -459,7 +466,7 @@ impl DataFlowEditor {
                         logs,
                     ),
                     Err(error) => {
-                        logs.push((LogLevel::Error, format!("Cannot connect nodes: {error:?}")))
+                        logs.push((LogLevel::Error, format!("cannot connect nodes: {error}")))
                     }
                 },
                 CanvasEvent::Disconnect { to, to_port } => {
@@ -512,19 +519,6 @@ fn disconnect_many_command(endpoints: Vec<(NodeId, u32)>) -> GraphCommand {
             .map(|(to, to_port)| GraphCommand::Disconnect { to, to_port })
             .collect(),
     )
-}
-
-fn icon_btn_enabled(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    icon: egui::ImageSource<'static>,
-    hover: &str,
-) -> egui::Response {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-        .tint(ui.visuals().text_color());
-    ui.add_enabled(enabled, egui::Button::image(image))
-        .on_hover_text(hover)
 }
 
 #[cfg(test)]

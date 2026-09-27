@@ -70,6 +70,26 @@ pub fn icon_button_sized(
     response.on_hover_text(tooltip)
 }
 
+/// Compact image button used by controls that can be disabled.
+pub fn icon_button_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: egui::ImageSource<'static>,
+    hover: &str,
+) -> egui::Response {
+    let image = egui::Image::new(icon)
+        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+        .tint(ui.visuals().text_color());
+    ui.add_enabled(enabled, egui::Button::image(image))
+        .on_hover_text(hover)
+}
+
+/// Draw a compact trace-color marker. The caller chooses its existing size.
+pub fn color_swatch(ui: &mut egui::Ui, color: egui::Color32, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
+}
+
 pub fn icon_text_button(
     ui: &mut egui::Ui,
     icon: egui::ImageSource<'static>,
@@ -128,6 +148,10 @@ pub fn menu_row(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryAction {
     Load,
+    #[cfg_attr(
+        not(feature = "scripting"),
+        allow(dead_code, reason = "editing is available only with scripting")
+    )]
     Edit,
     Duplicate,
     Remove,
@@ -836,6 +860,39 @@ mod tests {
             find("Unpinned plot").toggled(),
             Some(egui::accesskit::Toggled::False)
         );
+    }
+
+    #[test]
+    fn shared_icon_button_keeps_disabled_controls_inert() {
+        let ctx = egui::Context::default();
+        let mut states = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let texture =
+                egui::load::SizedTexture::new(egui::TextureId::default(), egui::Vec2::splat(1.0));
+            let disabled = icon_button_enabled(ui, false, texture.into(), "Run flow");
+            let enabled = icon_button_enabled(ui, true, texture.into(), "Stop flow");
+            states = Some((disabled.enabled(), enabled.enabled()));
+        });
+        assert_eq!(states, Some((false, true)));
+    }
+
+    #[test]
+    fn shared_swatches_keep_each_callers_existing_geometry() {
+        let ctx = egui::Context::default();
+        let color = egui::Color32::from_rgb(12, 34, 56);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            color_swatch(ui, color, 10.0);
+            color_swatch(ui, color, 12.0);
+        });
+        let sizes: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Rect(rect) if rect.fill == color => Some(rect.rect.size()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [egui::vec2(10.0, 10.0), egui::vec2(12.0, 12.0)]);
     }
 
     #[test]

@@ -299,14 +299,21 @@ pub struct Graph {
     pub(crate) next_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectError {
+    #[error("unknown node")]
     UnknownNode,
+    #[error("a node cannot connect to itself")]
     SelfLoop,
+    #[error("source node has no output")]
     NoOutput,
+    #[error("invalid port")]
     BadPort,
+    #[error("incompatible port types")]
     TypeMismatch,
+    #[error("input already connected")]
     InputOccupied,
+    #[error("connection would create a cycle")]
     Cycle,
 }
 
