@@ -706,7 +706,7 @@ fn available_copy_name(existing: &[String], name: &str) -> String {
             return candidate;
         }
     }
-    unreachable!()
+    unreachable!("copy-name suffix search must find an available name")
 }
 
 #[cfg(test)]

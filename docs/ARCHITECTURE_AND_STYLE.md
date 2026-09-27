@@ -69,6 +69,11 @@ source-level deduplication never reroutes them.
   and trait bounds. `#[from]` exposes a cause and appears only when that
   source contract is intended. Error types remain in their owning crates,
   never in a shared catch-all.
+- Poisoned mutexes remain fatal. An informative `expect` message may identify
+  the poisoned lock; poison is not silently recovered or converted to a
+  successful result. Error types in multi-domain crates remain reachable
+  through their owning modules. Root error re-exports exist only when they
+  are part of a deliberate facade contract.
 - Fallible persistence operations return owner-local typed errors; text
   conversion occurs at the existing UI or headless logging boundary. Store
   listing retains its documented best-effort behavior. Error context is

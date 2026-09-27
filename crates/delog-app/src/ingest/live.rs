@@ -109,7 +109,11 @@ impl ConnectionDialog {
                             ui.label(match self.kind {
                                 EndpointKind::UdpServer => "Bind",
                                 EndpointKind::TcpClient => "Remote",
-                                EndpointKind::Serial => unreachable!(),
+                                EndpointKind::Serial => {
+                                    unreachable!(
+                                        "serial endpoint is handled before host and port fields"
+                                    )
+                                }
                             });
                             ui.text_edit_singleline(&mut self.host);
                             ui.end_row();
