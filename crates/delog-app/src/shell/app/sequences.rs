@@ -234,12 +234,10 @@ impl DelogApp {
                     }
                     StepKind::Script => Ok(Some(ActiveOperation::ScriptReady(None))),
                     StepKind::Dataflow => {
-                        let graph = crate::dataflow::store::GraphStore::default_dir()
-                            .ok_or("application data directory is unavailable".to_owned())
-                            .and_then(|dir| {
-                                crate::dataflow::store::GraphStore::new(dir)
-                                    .load(&request.step.reference)
-                            });
+                        let graph = super::load_headless_graph(
+                            &request.step.reference,
+                            crate::dataflow::store::GraphStore::default_dir(),
+                        );
                         match graph {
                             Ok(graph) => {
                                 let key = (id.clone(), request.step.id);
