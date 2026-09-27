@@ -69,6 +69,11 @@ source-level deduplication never reroutes them.
   and trait bounds. `#[from]` exposes a cause and appears only when that
   source contract is intended. Error types remain in their owning crates,
   never in a shared catch-all.
+- Fallible persistence operations return owner-local typed errors; text
+  conversion occurs at the existing UI or headless logging boundary. Store
+  listing retains its documented best-effort behavior. Error context is
+  constructed on failure paths, and successful file-operation order remains
+  unchanged by error-type refactors.
 - Domain IDs use newtypes. Unit boundaries carry `_us`, `_ms`, `_rad`, `_deg`,
   and `_m` suffixes; `delog-core::time` owns canonical time rules.
 - Comments explain invariants, precision traps, ordering, upstream quirks,
