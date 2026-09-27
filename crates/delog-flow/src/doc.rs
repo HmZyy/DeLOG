@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fmt;
 
 use serde_json::{Map, Value, json};
 
@@ -15,29 +14,15 @@ pub(crate) fn required_version(graph: &Graph) -> u32 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DocError {
+    #[error("missing delog_dataflow version")]
     MissingVersion,
+    #[error("unsupported data-flow document version {0}")]
     UnsupportedVersion(u32),
+    #[error("invalid data-flow document: {0}")]
     Invalid(String),
 }
-
-impl fmt::Display for DocError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingVersion => formatter.write_str("missing delog_dataflow version"),
-            Self::UnsupportedVersion(version) => {
-                write!(
-                    formatter,
-                    "unsupported data-flow document version {version}"
-                )
-            }
-            Self::Invalid(message) => write!(formatter, "invalid data-flow document: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for DocError {}
 
 pub fn to_json(graph: &Graph) -> Value {
     let nodes: Vec<Value> = graph.nodes.iter().map(node_to_json).collect();

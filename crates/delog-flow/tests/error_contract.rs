@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use delog_flow::command::ApplyError;
+use delog_flow::doc::DocError;
 use delog_flow::graph::ConnectError;
 
 #[test]
@@ -23,4 +24,23 @@ fn command_error_retains_the_connection_cause() {
         error.source().map(ToString::to_string),
         Some("connection would create a cycle".to_owned())
     );
+}
+
+#[test]
+fn document_errors_keep_existing_messages() {
+    let cases = [
+        (DocError::MissingVersion, "missing delog_dataflow version"),
+        (
+            DocError::UnsupportedVersion(99),
+            "unsupported data-flow document version 99",
+        ),
+        (
+            DocError::Invalid("bad node".into()),
+            "invalid data-flow document: bad node",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+        assert!(error.source().is_none());
+    }
 }
