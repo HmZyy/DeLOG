@@ -412,7 +412,7 @@ impl DataFlowEditor {
                 if let Some(previous) = renamed_from
                     && let Err(error) = store.delete(&previous)
                 {
-                    logs.push((LogLevel::Error, error));
+                    logs.push((LogLevel::Error, error.to_string()));
                 }
                 self.controller.dirty = false;
                 self.loaded_name = Some(name.clone());
@@ -420,7 +420,7 @@ impl DataFlowEditor {
                 true
             }
             Err(error) => {
-                logs.push((LogLevel::Error, error));
+                logs.push((LogLevel::Error, error.to_string()));
                 false
             }
         }
