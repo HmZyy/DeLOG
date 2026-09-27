@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use delog_core::diagnostics::Diag;
 use delog_core::identity::{FieldId, SourceId};
@@ -273,8 +274,9 @@ pub struct SourceChoice {
 
 #[derive(Clone, Debug)]
 pub enum LayoutError {
-    Io(String),
-    Json(String),
+    Io(Arc<std::io::Error>),
+    Json(Arc<serde_json::Error>),
+    MissingParent,
     UnsupportedVersion(u32),
     NoStorageDir,
     MissingVersion,
@@ -283,12 +285,35 @@ pub enum LayoutError {
 impl std::fmt::Display for LayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "layout IO error: {e}"),
-            Self::Json(e) => write!(f, "layout JSON error: {e}"),
-            Self::UnsupportedVersion(v) => write!(f, "unsupported layout version {v}"),
-            Self::NoStorageDir => write!(f, "no layout storage directory available"),
-            Self::MissingVersion => write!(f, "layout JSON is missing `delog_layout`"),
+            Self::Io(error) => write!(f, "layout IO error: {error}"),
+            Self::Json(error) => write!(f, "layout JSON error: {error}"),
+            Self::MissingParent => f.write_str("layout IO error: layout path has no parent"),
+            Self::UnsupportedVersion(version) => write!(f, "unsupported layout version {version}"),
+            Self::NoStorageDir => f.write_str("no layout storage directory available"),
+            Self::MissingVersion => f.write_str("layout JSON is missing `delog_layout`"),
         }
+    }
+}
+
+impl std::error::Error for LayoutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error.as_ref()),
+            Self::Json(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for LayoutError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(Arc::new(error))
+    }
+}
+
+impl From<serde_json::Error> for LayoutError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(Arc::new(error))
     }
 }
 
@@ -307,13 +332,11 @@ fn list_layouts_in(dir: &Path) -> Result<Vec<String>, LayoutError> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(LayoutError::Io(error.to_string())),
+        Err(error) => return Err(error.into()),
     };
     let mut names = Vec::new();
     for entry in read {
-        let path = entry
-            .map_err(|error| LayoutError::Io(error.to_string()))?
-            .path();
+        let path = entry?.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json")
             && let Some(name) = path.file_stem().and_then(|s| s.to_str())
         {
@@ -330,7 +353,8 @@ pub fn list_layouts() -> Vec<String> {
 
 pub fn delete_named(name: &str) -> Result<(), LayoutError> {
     let path = named_layout_path(name)?;
-    fs::remove_file(path).map_err(|e| LayoutError::Io(e.to_string()))
+    fs::remove_file(path)?;
+    Ok(())
 }
 
 pub fn duplicate_named(from: &str, to: &str) -> Result<(), LayoutError> {
@@ -346,17 +370,15 @@ pub fn rename_named(from: &str, to: &str) -> Result<(), LayoutError> {
     let from_path = named_layout_path(from)?;
     let to_path = named_layout_path(to)?;
     if from_path != to_path {
-        fs::remove_file(from_path).map_err(|e| LayoutError::Io(e.to_string()))?;
+        fs::remove_file(from_path)?;
     }
     Ok(())
 }
 
 pub fn save_named(name: &str, doc: &LayoutDoc) -> Result<(), LayoutError> {
     let path = named_layout_path(name)?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| LayoutError::Io("layout path has no parent".into()))?;
-    fs::create_dir_all(dir).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let dir = path.parent().ok_or(LayoutError::MissingParent)?;
+    fs::create_dir_all(dir)?;
     let json = doc_json(doc)?;
     write_json_atomic(&path, &json)
 }
@@ -406,20 +428,19 @@ fn load_app_settings_at(path: &Path) -> AppSettings {
 }
 
 fn save_app_settings_at(path: &Path, settings: &AppSettings) -> Result<(), LayoutError> {
-    let json =
-        serde_json::to_string_pretty(settings).map_err(|e| LayoutError::Json(e.to_string()))?;
+    let json = serde_json::to_string_pretty(settings)?;
     write_json_atomic(path, &json)
 }
 
 pub fn doc_json(doc: &LayoutDoc) -> Result<String, LayoutError> {
-    serde_json::to_string_pretty(doc).map_err(|e| LayoutError::Json(e.to_string()))
+    Ok(serde_json::to_string_pretty(doc)?)
 }
 
 fn write_json_atomic(path: &Path, json: &str) -> Result<(), LayoutError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        fs::create_dir_all(parent).map_err(|e| LayoutError::Io(e.to_string()))?;
+        fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension(format!(
         "{}tmp",
@@ -428,8 +449,8 @@ fn write_json_atomic(path: &Path, json: &str) -> Result<(), LayoutError> {
             .map(|s| format!("{s}."))
             .unwrap_or_default()
     ));
-    fs::write(&tmp, json).map_err(|e| LayoutError::Io(e.to_string()))?;
-    fs::rename(&tmp, path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -438,14 +459,14 @@ pub fn load_named_doc(name: &str) -> Result<LayoutDoc, LayoutError> {
 }
 
 pub fn import_doc(path: &Path) -> Result<LayoutDoc, LayoutError> {
-    let bytes = fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let bytes = fs::read_to_string(path)?;
     decode_doc(&bytes)
 }
 
 pub fn decode_doc(json: &str) -> Result<LayoutDoc, LayoutError> {
-    let value: Value = serde_json::from_str(json).map_err(|e| LayoutError::Json(e.to_string()))?;
+    let value: Value = serde_json::from_str(json)?;
     let value = migrate_to_current(value)?;
-    serde_json::from_value(value).map_err(|e| LayoutError::Json(e.to_string()))
+    Ok(serde_json::from_value(value)?)
 }
 
 fn migrate_to_current(value: Value) -> Result<Value, LayoutError> {
