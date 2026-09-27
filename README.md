@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/banner.png" alt="DeLOG" width="100%">
-</p>
-
 # DéLOG
 
 DéLOG is a fast, GPU-accelerated **drone flight-log and live-telemetry analyzer**.
@@ -9,18 +5,11 @@ It supports PX4 ULog, ArduPilot BIN, and MAVLink telemetry logs from QGroundCont
 or Mission Planner, and when a format or a derived signal isn't built in, you extend
 it in Python - both file parsers and analysis scripts - without recompiling.
 
-### Log analysis
 
-![DéLOG log analysis](docs/layout_log.gif)
-
-### Live telemetry
-
-![DéLOG live telemetry](docs/layout_live.gif)
+![DéLOG screenshot](docs/screenshot.png)
 
 ## Features
 
-- **Drag-and-drop UI** - drop a log file anywhere on the window to load it; arrange plots
-  in a tiling workspace that persists across sessions.
 - **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), MAVLink
   telemetry logs (`.tlog`) from QGroundControl or Mission Planner, and Parquet files,
   with automatic format sniffing and a manual-override picker. Structured DéLOG Parquet
@@ -38,61 +27,37 @@ it in Python - both file parsers and analysis scripts - without recompiling.
 - **Fast WGPU visualization** - GPU-rendered line/scatter/step plots with automatic
   decimation for million-point series, plus a 3D trajectory view with vehicle models.
 
-### Noteworthy
 
-- **Live and offline share one path.** A live MAVLink stream and a recorded `.tlog`
-  round-trip through identical decoding code, so what you see live is what you replay.
-- **Structured Parquet preserves native topics.** DéLOG exports retain each topic's own
-  timestamps and supported integer, floating-point, boolean, and UTF-8 fields, then
-  reopen automatically without a timestamp prompt. Columns are named `TOPIC.field` and
-  carry unit, description, and multiplier metadata, so pandas or DuckDB read the file
-  without decoding the DéLOG manifest.
-- **Export sampling is format-aware.** Parquet writes each selected topic's native
-  samples, while CSV retains uniform resampling.
-- **Extend it in Python, no rebuild.** Custom parsers and analysis scripts are plain `.py`
-  files in your config directory - edit them in any editor and they appear in the menus.
-- **Real CPython, not a sandboxed subset.** Scripts get the full interpreter with NumPy
-  (and SciPy/Bottleneck/CFFI when installed), so derived-field math is just NumPy.
-- **Single binary.** Shaders, 3D models, and the color palette are embedded at build time;
-  a stripped binary always renders.
+## Installation
 
-## Quickstart
+Download the latest release from [GitHub Releases](https://github.com/HmZyy/DeLOG/releases/latest).
+
+- **Windows:** use the bundled setup executable, or download a portable ZIP.
+- **Linux:** use the AppImage, or download and extract a tarball.
+- Builds ending in `-no-scripting` do not require Python.
+- For builds that use a local Python installation, install
+  [Python 3.12.3](https://www.python.org/downloads/release/python-3123/).
+
+### Build from source
+
+Install [Rust via rustup](https://rustup.rs/). For scripting builds, also install
+Python 3.12.3 with its development headers. The repository selects the required
+Rust version automatically.
+
+Clone and build DeLOG:
 
 ```bash
-# Build and run (embedded Python scripting is on by default)
-cargo run -p delog-app
-
-# Build without Python - no interpreter or dev headers required
-cargo run -p delog-app --no-default-features
+git clone https://github.com/HmZyy/DeLOG.git
+cd DeLOG
+cargo build --release --locked -p delog-app
 ```
 
-Scripting embeds CPython via `pyo3`, so the default build needs
-[Python 3.12.3](https://www.python.org/downloads/release/python-3123/) plus
-the matching development headers. Disabling the default feature drops that
-requirement entirely. See [docs/scripting.md](docs/scripting.md#enabling-scripting)
-for interpreter-pinning tips.
+The executable is `target/release/delog` on Linux or
+`target\release\delog.exe` on Windows. To build without Python scripting:
 
-## Scripting (overview)
-
-DéLOG runs Python scripts that read the loaded dataset and **emit new fields and topics** -
-derived signals that flow through the normal ingestion path and plot like log data. There
-are two modes: **snapshot scripts** that run once against the current data, and **live
-transforms** (`@delog.live_transform`) that append derived fields as telemetry arrives. A
-Console window provides an editor and a persistent REPL.
-
-Bundled examples live in [`scripts/`](scripts/): one-shot examples are in
-[`scripts/snapshot/`](scripts/snapshot/) and future-batch examples are in
-[`scripts/live/`](scripts/live/). Each declarative example sets its mode
-explicitly, so its filename and directory match when it runs.
-Full API reference and examples:
-**[docs/scripting.md](docs/scripting.md)**.
-
-## Custom parsers (overview)
-
-When DéLOG's built-in parsers don't cover a format, add a Python parser under
-**Tools ▸ Parsers**. The file receives the raw bytes as a NumPy `float32` array and returns
-`(field_name, values, tooltip)` triples that become topics and fields. Full guide:
-**[docs/custom_parsers.md](docs/custom_parsers.md)**.
+```bash
+cargo build --release --locked -p delog-app --no-default-features
+```
 
 ## Documentation
 
