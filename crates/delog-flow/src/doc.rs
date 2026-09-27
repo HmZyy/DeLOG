@@ -188,7 +188,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::Output(_) => "output",
         #[cfg(feature = "scripting")]
         NodeKind::Script(_) => "script",
-        NodeKind::Unknown(_) => unreachable!(),
+        NodeKind::Unknown(_) => unreachable!("unknown nodes return raw JSON before tag selection"),
     };
     object.insert("type".to_owned(), Value::String(tag.to_owned()));
     Value::Object(object)
@@ -569,6 +569,7 @@ mod tests {
         let back = to_json(&g);
         assert_eq!(back["nodes"][0]["type"], "resample");
         assert_eq!(back["nodes"][0]["hz"], 50);
+        assert_eq!(back["nodes"][0], raw["nodes"][0]);
     }
 
     #[test]
