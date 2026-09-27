@@ -93,18 +93,18 @@ impl FilterSpec {
     pub fn validate(&self) -> Result<(), String> {
         if !self.value.is_finite() {
             return Err(if self.filter.is_range() {
-                "Filter minimum must be finite."
+                "filter minimum must be finite"
             } else {
-                "Filter threshold must be finite."
+                "filter threshold must be finite"
             }
             .to_owned());
         }
         if self.filter.is_range() {
             if !self.upper.is_finite() {
-                return Err("Filter maximum must be finite.".to_owned());
+                return Err("filter maximum must be finite".to_owned());
             }
             if self.value > self.upper {
-                return Err("Filter minimum must be less than or equal to maximum.".to_owned());
+                return Err("filter minimum must be less than or equal to maximum".to_owned());
             }
         }
         Ok(())
@@ -114,6 +114,35 @@ impl FilterSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_validation_messages_follow_style() {
+        let mut spec = FilterSpec::new(FilterKind::Equal);
+        spec.value = f64::NAN;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "filter threshold must be finite"
+        );
+
+        spec = FilterSpec::new(FilterKind::Between);
+        spec.value = f64::NAN;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "filter minimum must be finite"
+        );
+        spec.value = 0.0;
+        spec.upper = f64::INFINITY;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "filter maximum must be finite"
+        );
+        spec.value = 2.0;
+        spec.upper = 1.0;
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "filter minimum must be less than or equal to maximum"
+        );
+    }
 
     #[test]
     fn predicates_keep_exact_matches_and_documented_boundaries() {
