@@ -143,7 +143,7 @@ pub fn from_json(value: &Value) -> Result<Graph, DocError> {
         if !matches!(from.kind, NodeKind::Unknown(_)) && !matches!(to.kind, NodeKind::Unknown(_)) {
             graph
                 .connect(edge.from, edge.from_port, edge.to, edge.to_port)
-                .map_err(|error| invalid(&format!("{error:?}")))?;
+                .map_err(|error| invalid(&error.to_string()))?;
             continue;
         }
         if edge.from == edge.to {

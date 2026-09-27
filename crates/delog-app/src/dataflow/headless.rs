@@ -8,6 +8,8 @@ use delog_flow::graph::{Graph, NodeKind};
 use super::controller::DataFlowController;
 use crate::ui::logging::LogLevel;
 
+pub type FlowDriveResult = (Vec<(LogLevel, String)>, Option<Result<(), String>>);
+
 pub struct HeadlessFlow {
     pub controller: DataFlowController,
     pub initialized: bool,
@@ -37,7 +39,7 @@ impl HeadlessFlow {
         now: f64,
         throttle_ms: u32,
         overlap_secs: f32,
-    ) -> (Vec<(LogLevel, String)>, Option<Result<(), String>>) {
+    ) -> FlowDriveResult {
         let logs = self.controller.poll(sender);
         let result = self.controller.take_publication_result();
         if result.as_ref().is_some_and(Result::is_ok) {

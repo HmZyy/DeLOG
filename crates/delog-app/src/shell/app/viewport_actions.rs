@@ -232,7 +232,7 @@ mod tests {
             })
             .unwrap_or_default();
         let mut actions = Vec::new();
-        let _ = ctx.run(
+        let _ = ctx.run_ui(
             egui::RawInput {
                 viewport_id,
                 viewports: std::iter::once((viewport_id, Default::default())).collect(),
@@ -241,7 +241,7 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ctx| actions = collect_shortcut_actions(ctx, origin, false),
+            |ui| actions = collect_shortcut_actions(ui.ctx(), origin, false),
         );
         actions
     }
@@ -465,7 +465,7 @@ mod tests {
                 })
                 .unwrap_or_default();
             let mut actions = Vec::new();
-            let _ = ctx.run(
+            let _ = ctx.run_ui(
                 egui::RawInput {
                     viewport_id: WindowId(7).viewport_id(),
                     viewports: std::iter::once((WindowId(7).viewport_id(), Default::default()))
@@ -475,9 +475,9 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ctx| {
-                    actions = collect_shortcut_actions(ctx, WindowId(7), false);
-                    egui::CentralPanel::default().show(ctx, |ui| {
+                |ui| {
+                    actions = collect_shortcut_actions(ui.ctx(), WindowId(7), false);
+                    egui::CentralPanel::default().show_inside(ui, |ui| {
                         let response = ui.add(egui::TextEdit::singleline(text));
                         if focus {
                             response.request_focus();
