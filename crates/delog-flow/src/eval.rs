@@ -13,7 +13,8 @@ use crate::graph::{Graph, NodeId, NodeKind};
 use crate::resolve::resolve_field;
 use crate::types::{Signal, SignalMeta, TimelineId, Value};
 
-const TIMELINE_MISMATCH: &str = "Timeline mismatch: the inputs do not share the same timestamps. Add an Align node before this operation.";
+const TIMELINE_MISMATCH: &str = "timeline mismatch: the inputs do not share the same timestamps; add an Align node before this operation";
+const NUMERIC_INPUT_REQUIRED: &str = "this operation requires numeric input";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -106,7 +107,7 @@ fn evaluate_inner(
                 values: HashMap::new(),
                 diagnostics: vec![Diagnostic {
                     node,
-                    message: "Graph contains a cycle.".to_owned(),
+                    message: "graph contains a cycle".to_owned(),
                 }],
             };
         }
@@ -135,7 +136,7 @@ fn evaluate_inner(
                     report.diagnostics.push(Diagnostic {
                         node: id,
                         message: format!(
-                            "Field '{}' is a string field; math nodes require numeric input.",
+                            "field '{}' is a string field; math nodes require numeric input",
                             selector.field
                         ),
                     });
@@ -176,7 +177,7 @@ fn evaluate_inner(
                 if !value.is_finite() {
                     report.diagnostics.push(Diagnostic {
                         node: id,
-                        message: "Value must be finite.".to_owned(),
+                        message: "value must be finite".to_owned(),
                     });
                     continue;
                 }
@@ -195,7 +196,7 @@ fn evaluate_inner(
             }
             NodeKind::Unknown(_) => report.diagnostics.push(Diagnostic {
                 node: id,
-                message: "Unknown node type; this graph was saved by a newer version.".to_owned(),
+                message: "unknown node type; this graph was saved by a newer version".to_owned(),
             }),
             #[cfg(feature = "scripting")]
             NodeKind::Script(spec) => {
@@ -246,7 +247,7 @@ fn evaluate_inner(
                 {
                     report.diagnostics.push(Diagnostic {
                         node: id,
-                        message: "Value must be finite.".to_owned(),
+                        message: "value must be finite".to_owned(),
                     });
                     continue;
                 }
@@ -291,7 +292,7 @@ fn gather_inputs(
         let Some((upstream, from_port)) = graph.incoming(id, port_index as u32) else {
             report.diagnostics.push(Diagnostic {
                 node: id,
-                message: format!("Input {} has no connection.", port.name),
+                message: format!("input {} has no connection", port.name),
             });
             blocked = true;
             continue;
@@ -427,7 +428,7 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Vec<Value>, Vec
                 Vec::new(),
             )
         }
-        _ => return Err("This operation requires numeric input.".to_owned()),
+        _ => return Err(NUMERIC_INPUT_REQUIRED.to_owned()),
     };
     Ok((vec![value], messages))
 }
@@ -448,7 +449,7 @@ fn signal_binary(
             && a_unit != b_unit
         {
             messages.push(format!(
-                "Units differ ({a_unit} vs {b_unit}); output unit cleared."
+                "units differ ({a_unit} vs {b_unit}); output unit cleared"
             ));
         }
         None
@@ -478,7 +479,7 @@ fn signal_or_scalar_binary(
 ) -> Result<(Value, Vec<String>), String> {
     let a = require_signal(inputs.first())?;
     let Some(b) = inputs.get(1) else {
-        return Err("This operation requires numeric input.".to_owned());
+        return Err(NUMERIC_INPUT_REQUIRED.to_owned());
     };
     match b {
         Value::Scalar(scalar) => {
@@ -520,7 +521,7 @@ fn signal_or_scalar_binary(
 fn require_signal(value: Option<&Value>) -> Result<&Signal, String> {
     match value {
         Some(Value::Signal(signal)) => Ok(signal),
-        _ => Err("This operation requires numeric input.".to_owned()),
+        _ => Err(NUMERIC_INPUT_REQUIRED.to_owned()),
     }
 }
 
@@ -529,7 +530,7 @@ fn require_same_timeline(a: &Signal, b: &Signal) -> Result<(), String> {
         return Err(TIMELINE_MISMATCH.to_owned());
     }
     if a.t.len() != b.t.len() || a.v.len() != b.v.len() {
-        return Err("Signals on the same timeline have different lengths.".to_owned());
+        return Err("signals on the same timeline have different lengths".to_owned());
     }
     Ok(())
 }
@@ -694,6 +695,26 @@ mod tests {
                 "{actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn evaluator_diagnostic_messages_follow_style() {
+        assert_eq!(
+            evaluate_kernel(&NodeKind::Add, &[]).unwrap_err(),
+            "this operation requires numeric input"
+        );
+
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let add = add_node(&mut graph, NodeKind::Add);
+        let report = eval_single(&graph, &snapshot, add);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.node == add && diagnostic.message == "input B has no connection"
+        }));
+        assert_eq!(
+            TIMELINE_MISMATCH,
+            "timeline mismatch: the inputs do not share the same timestamps; add an Align node before this operation"
+        );
     }
 
     #[test]
@@ -1113,12 +1134,11 @@ mod tests {
 
         let report = eval_single(&graph, &snapshot, add);
         assert!(!report.values.contains_key(&add));
-        assert!(
-            report
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("Add an Align node"))
-        );
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.node == add
+                && diagnostic.message
+                    == "timeline mismatch: the inputs do not share the same timestamps; add an Align node before this operation"
+        }));
     }
 
     #[test]
@@ -1137,7 +1157,7 @@ mod tests {
             !report
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("Add an Align node")),
+                .any(|diagnostic| diagnostic.message.contains("Align node")),
             "topics that already share timestamps need no align, got {:?}",
             report.diagnostics
         );
@@ -1180,7 +1200,7 @@ mod tests {
 
         let report = eval_single(&graph, &snapshot, add);
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.node == add && diagnostic.message == "Input B has no connection."
+            diagnostic.node == add && diagnostic.message == "input B has no connection"
         }));
         assert!(
             report
@@ -1225,7 +1245,7 @@ mod tests {
             report
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("Units differ"))
+                .any(|diagnostic| diagnostic.message.contains("units differ"))
         );
     }
 
