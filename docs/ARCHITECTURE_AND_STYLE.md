@@ -65,7 +65,10 @@ current owner; source-level deduplication is not a reason to reroute it.
 - Preserve typed causes in errors. Use the workspace's `thiserror` derive
   for straightforward `Display` and `Error` implementations; present action
   context at the UI boundary. Error messages use lowercase without a final
-  period. Avoid `{:?}` for user-facing errors.
+  period. Avoid `{:?}` for user-facing errors. When refactoring an existing
+  error, pin its message, `Error::source`, conversions, and trait bounds in
+  tests first. `#[from]` exposes a cause; add it only when that source contract
+  is intended. Keep error types with their owning crate, not a shared catch-all.
 - Use domain ID newtypes and `_us`, `_ms`, `_rad`, `_deg`, and `_m` suffixes at
   unit boundaries. `delog-core::time` is the owner of canonical time rules.
 - Comments explain why: invariants, precision traps, ordering, and upstream
