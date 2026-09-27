@@ -1219,7 +1219,7 @@ fn available_copy_name(existing: &[String], name: &str) -> String {
             return candidate;
         }
     }
-    unreachable!()
+    unreachable!("copy-name suffix search must find an available name")
 }
 
 /// Render one param's widget and return `Some(new_value)` only when the edit

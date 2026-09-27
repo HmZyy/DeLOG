@@ -861,7 +861,7 @@ mod tests {
         assert!(geodetic_reference(&snap, &ned_config(fields)).is_none());
         let mut config = ned_config(fields);
         let PosMapping::Ned { reference, .. } = &mut config.pos else {
-            unreachable!()
+            unreachable!("ned_config always creates a NED position mapping")
         };
         *reference = Some(NedReference::Manual(GeoRef {
             lat_deg: 48.0,
