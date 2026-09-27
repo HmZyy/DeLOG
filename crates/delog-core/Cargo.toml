@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 arrow = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
