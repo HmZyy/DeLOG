@@ -307,17 +307,13 @@ pub struct ValueTransitions {
     pub transitions: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransitionsError {
-    FieldView(FieldViewError),
+    #[error("{0}")]
+    FieldView(#[from] FieldViewError),
     /// Field is likely continuous; refuse rather than mark every value.
+    #[error("too many distinct values: {0}")]
     TooManyValues(usize),
-}
-
-impl From<FieldViewError> for TransitionsError {
-    fn from(e: FieldViewError) -> Self {
-        Self::FieldView(e)
-    }
 }
 
 /// A transition is a sample differing from the previous non-null value (first
@@ -580,6 +576,27 @@ mod tests {
         );
         let err = field_value_transitions(&snapshot, field, 3).unwrap_err();
         assert_eq!(err, TransitionsError::TooManyValues(4));
+    }
+
+    #[test]
+    fn transition_errors_are_displayable() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<TransitionsError>();
+
+        let field_error = TransitionsError::from(FieldViewError::MissingSource);
+        assert_eq!(
+            field_error,
+            TransitionsError::FieldView(FieldViewError::MissingSource)
+        );
+        assert_eq!(field_error.to_string(), "missing source for field topic");
+        assert_eq!(
+            std::error::Error::source(&field_error).unwrap().to_string(),
+            "missing source for field topic"
+        );
+
+        let too_many = TransitionsError::TooManyValues(4);
+        assert_eq!(too_many.to_string(), "too many distinct values: 4");
+        assert!(std::error::Error::source(&too_many).is_none());
     }
 
     #[test]
