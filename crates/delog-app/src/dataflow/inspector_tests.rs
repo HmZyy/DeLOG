@@ -321,7 +321,7 @@ fn an_invalid_filter_range_reports_the_error_under_a_diagnostics_heading() {
         .iter()
         .find(|node| {
             node.value()
-                .is_some_and(|value| value.starts_with("Filter minimum must be less"))
+                .is_some_and(|value| value.starts_with("filter minimum must be less"))
         })
         .expect("the validation message is shown");
     let bounds = message.bounds().unwrap();
