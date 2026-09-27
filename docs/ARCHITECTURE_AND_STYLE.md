@@ -1,12 +1,11 @@
 # Architecture and coding style
 
-Use this guide when adding a feature to DeLOG. It records the current
-ownership boundaries, extension points, coding conventions, and checks to
-run before integration.
+DeLOG features follow the ownership boundaries, extension points, coding
+conventions, and integration checks defined here.
 
 ## Where code belongs
 
-| Owner | Responsibility | Extend here when... |
+| Owner | Responsibility | Changes owned here |
 | --- | --- | --- |
 | `delog-core` | IDs, canonical microsecond time, immutable chunks and snapshots, ingest, diagnostics | data shape or storage semantics change |
 | `delog-parsers` | file format detection and decoding | a new file format is read |
@@ -22,75 +21,77 @@ run before integration.
 When the external Python API branch is present, `delog-remote` owns its
 authenticated loopback protocol and explicit HTTP routes;
 `python/delog-client` owns Python transport, models, and client ergonomics.
-Both adapt to the native `delog-api` contracts. A new remote operation must
-keep authorization, route mapping, and app control dispatch in their current
-owners rather than introducing a second control path.
+Both adapt to the native `delog-api` contracts. Remote operations keep
+authorization, route mapping, and app control dispatch in their current
+owners; a second control path is not introduced.
 
-Dependencies should point toward the smallest owner of a concept. Put shared
-domain types in the owning library, not in `delog-app`; put shared egui widgets
-in `delog-app::ui::components`. A helper is useful when two real callers need
-the same behavior. Keep variant-specific choices at call sites, especially
-labels, routing, sizes, and error context.
+Dependencies point toward the smallest owner of a concept. Shared domain
+types belong in their owning library, not in `delog-app`; shared egui widgets
+belong in `delog-app::ui::components`. A helper is shared when two real
+callers need the same behavior. Variant-specific choices remain at call
+sites, especially labels, routing, sizes, and error context.
 
 ## Feature flow
 
-For a new input format: decode in `delog-parsers`, emit through the existing
-ingest API, then let snapshots, caches, and views consume it. For a new
-dataflow operation: define its graph contract in `delog-flow`, implement the
-evaluator there, and add the app editor presentation without duplicating
-evaluation rules. For a new application control: define the contract in
-`delog-api`, implement it at the app's control boundary, and adapt scripting
-or external clients to that same contract. Keep the route table and command
-dispatch explicit and test the caller-visible result.
+New input formats are decoded in `delog-parsers` and emitted through the
+existing ingest API; snapshots, caches, and views consume that output. New
+dataflow operations have their graph contract and evaluator in `delog-flow`;
+the app editor presents them without duplicating evaluation rules. New
+application controls have their contract in `delog-api` and their
+implementation at the app's control boundary; scripting and external clients
+adapt to that contract. Route tables and command dispatch remain explicit,
+and caller-visible results have tests.
 
 ## Routing and diagnostics
 
-Preserve the destination of each existing message unless a separate task
-explicitly changes that behavior. `Diag` carries ingest and data-quality
+The destination of each existing message remains unchanged unless a separate
+task explicitly changes that behavior. `Diag` carries ingest and data-quality
 context such as source and timestamp; `PendingLog` feeds the Logging dock.
-Follow the adjacent call sites and tests for a new event. Do not make a
-shared helper silently choose a different destination. A control API route,
-Python command, or UI shortcut must retain its existing path through the
-current owner; source-level deduplication is not a reason to reroute it.
+New events follow adjacent call sites and tests. Shared helpers never
+silently select a different destination. Control API routes, Python commands,
+and UI shortcuts retain their existing paths through the current owner;
+source-level deduplication never reroutes them.
 
 ## Rust style
 
-- Use Rust 2024, the pinned `rust-toolchain.toml`, `cargo fmt`, and Clippy.
-  Pin third-party versions once in `[workspace.dependencies]`; member crates
-  use `workspace = true`.
-- Prefer small modules with one clear responsibility. Keep public interfaces
-  narrow; use a named parameter struct when several calls carry the same
-  related options. Extract repeated logic only after the behavior and owner
-  are clear. Avoid a generic framework for one caller.
-- Preserve typed causes in errors. Use the workspace's `thiserror` derive
-  for straightforward `Display` and `Error` implementations; present action
-  context at the UI boundary. Error messages use lowercase without a final
-  period. Avoid `{:?}` for user-facing errors. When refactoring an existing
-  error, pin its message, `Error::source`, conversions, and trait bounds in
-  tests first. `#[from]` exposes a cause; add it only when that source contract
-  is intended. Keep error types with their owning crate, not a shared catch-all.
-- Use domain ID newtypes and `_us`, `_ms`, `_rad`, `_deg`, and `_m` suffixes at
-  unit boundaries. `delog-core::time` is the owner of canonical time rules.
-- Comments explain why: invariants, precision traps, ordering, and upstream
-  quirks. Prefer `//!` for a module contract and `///` for a public item.
-  `// SAFETY:` precedes an unsafe block. Do not restate the next line.
-- Test names describe behavior. Keep a short unit test beside its code; use
-  a sibling `tests.rs` or integration test when a larger fixture or public
-  boundary is involved. Test real results and error paths, not source text.
+- Rust 2024, the pinned `rust-toolchain.toml`, `cargo fmt`, and Clippy are the
+  workspace standards. Third-party versions are pinned once in
+  `[workspace.dependencies]`; member crates use `workspace = true`.
+- Modules have one clear responsibility and public interfaces remain narrow.
+  A named parameter struct carries related options across repeated calls.
+  Repeated logic is extracted only when its behavior and owner are clear; a
+  single caller does not justify a generic framework.
+- Errors retain typed causes. The workspace's `thiserror` derive handles
+  straightforward `Display` and `Error` implementations; the UI boundary
+  supplies action context. Error messages are lowercase without a final
+  period, and user-facing errors use `Display`, not `{:?}`. Before an existing
+  error is refactored, tests pin its message, `Error::source`, conversions,
+  and trait bounds. `#[from]` exposes a cause and appears only when that
+  source contract is intended. Error types remain in their owning crates,
+  never in a shared catch-all.
+- Domain IDs use newtypes. Unit boundaries carry `_us`, `_ms`, `_rad`, `_deg`,
+  and `_m` suffixes; `delog-core::time` owns canonical time rules.
+- Comments explain invariants, precision traps, ordering, upstream quirks,
+  and other reasons behind code. Module contracts use `//!`; public items use
+  `///`. Unsafe blocks have a preceding `// SAFETY:` explanation. Comments
+  do not restate the next line.
+- Test names describe behavior. Short unit tests sit beside their code;
+  larger fixtures and public boundaries use a sibling `tests.rs` or an
+  integration test. Tests assert real results and error paths, not source text.
 
 ## UI and performance
 
-Use `ui::icons`, `ui::components`, `ui::design_tokens`, and the active theme
-for shared controls. A reused component must preserve enabled state, hover
-text, size, color, and widget identity where those affect interaction.
-Keep UI labels and error context with the calling feature.
+Shared controls use `ui::icons`, `ui::components`, `ui::design_tokens`, and the
+active theme. Reused components preserve enabled state, hover text, size,
+color, and widget identity wherever those affect interaction. UI labels and
+error context remain with the calling feature.
 
-In ingest, cache, and render loops, preserve bounded queues, short lock
-scopes, and existing allocation patterns. Avoid dynamic dispatch, new
-allocations, or synchronization in a hot path just to remove duplicate
-syntax. Compare a relevant existing benchmark or profile before and after
-changing an algorithm. For structural refactors, first pin externally
-visible behavior in tests, then run the same tests on the new implementation.
+In ingest, cache, and render loops, queues remain bounded, lock scopes remain
+short, and existing allocation patterns remain unchanged. Removing duplicate
+syntax never adds dynamic dispatch, allocations, or synchronization to a hot
+path. Algorithm changes have a relevant before-and-after benchmark or
+profile. Structural refactors have tests that pin externally visible behavior
+before the change and run again afterward.
 
 ## Local checks
 
@@ -102,8 +103,8 @@ cargo test --workspace --locked --exclude delog-script -- --test-threads=1
 cargo test -p delog-script --locked -- --test-threads=1
 ```
 
-Run the relevant package's tests while implementing; run the full matrix
-before integrating. The single-threaded Rust run also avoids concurrent
+The relevant package's tests run during implementation; the full matrix runs
+before integration. The single-threaded Rust run also avoids concurrent
 headless GPU initialization on systems whose Vulkan loader is not stable
-under parallel tests. If a feature adds another language or client, run its
-own test suite as well. Route changes require explicit route-contract tests.
+under parallel tests. Each additional language or client has its own test
+suite. Route changes have explicit route-contract tests.
