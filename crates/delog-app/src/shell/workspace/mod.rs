@@ -1803,7 +1803,7 @@ impl Behavior<'_> {
                     for (field, label, color) in entries {
                         let clicked = ui
                             .horizontal(|ui| {
-                                color_swatch(ui, color);
+                                components::color_swatch(ui, color, 12.0);
                                 ui.button(label).clicked()
                             })
                             .inner;
@@ -1817,7 +1817,7 @@ impl Behavior<'_> {
                     for (index, label, color) in ghosts {
                         let clicked = ui
                             .horizontal(|ui| {
-                                color_swatch(ui, color);
+                                components::color_swatch(ui, color, 12.0);
                                 ui.button(label).clicked()
                             })
                             .inner;
@@ -2568,11 +2568,6 @@ fn menu_icon(ui: &egui::Ui, src: egui::ImageSource<'static>) -> egui::Image<'sta
     egui::Image::new(src)
         .fit_to_exact_size(egui::vec2(16.0, 16.0))
         .tint(ui.visuals().text_color())
-}
-
-fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn format_bytes(bytes: u64) -> String {

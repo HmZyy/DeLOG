@@ -1101,7 +1101,7 @@ impl ScriptsPanel {
                     .as_ref()
                     .is_some_and(|e| e.has_live_transform(&run_name));
 
-                if icon_btn_enabled(
+                if crate::ui::components::icon_button_enabled(
                     ui,
                     self.ordinary_dispatch_enabled(),
                     crate::ui::icons::play(),
@@ -1119,7 +1119,7 @@ impl ScriptsPanel {
                     );
                 }
 
-                if icon_btn_enabled(
+                if crate::ui::components::icon_button_enabled(
                     ui,
                     self.can_interrupt_console(),
                     crate::ui::icons::square(),
@@ -1130,7 +1130,7 @@ impl ScriptsPanel {
                     self.request_interrupt();
                 }
 
-                if icon_btn_enabled(
+                if crate::ui::components::icon_button_enabled(
                     ui,
                     has_live,
                     crate::ui::icons::unplug(),
@@ -1219,25 +1219,7 @@ fn available_copy_name(existing: &[String], name: &str) -> String {
             return candidate;
         }
     }
-    unreachable!()
-}
-
-#[allow(dead_code)]
-fn icon_btn(ui: &mut egui::Ui, icon: egui::ImageSource<'static>, hover: &str) -> egui::Response {
-    icon_btn_enabled(ui, true, icon, hover)
-}
-
-fn icon_btn_enabled(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    icon: egui::ImageSource<'static>,
-    hover: &str,
-) -> egui::Response {
-    let image = egui::Image::new(icon)
-        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-        .tint(ui.visuals().text_color());
-    ui.add_enabled(enabled, egui::Button::image(image))
-        .on_hover_text(hover)
+    unreachable!("copy-name suffix search must find an available name")
 }
 
 /// Render one param's widget and return `Some(new_value)` only when the edit

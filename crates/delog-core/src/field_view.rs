@@ -1,6 +1,5 @@
 //! Zero-copy field accessors over immutable snapshots.
 
-use std::error::Error;
 use std::fmt;
 
 use arrow::array::{
@@ -48,12 +47,17 @@ pub struct FieldView<'a> {
     source_offset_us: TimestampUs,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FieldViewError {
+    #[error("invalid field id {0:?}")]
     InvalidFieldId(FieldId),
+    #[error("missing topic {0:?}")]
     MissingTopic(TopicId),
+    #[error("missing source for field topic")]
     MissingSource,
+    #[error("missing topic store for {0:?}")]
     MissingTopicStore(TopicId),
+    #[error("field `{field}` is missing from schema for {topic:?}")]
     FieldMissingFromSchema { topic: TopicId, field: String },
 }
 
@@ -367,22 +371,6 @@ impl fmt::Debug for FieldView<'_> {
             .finish()
     }
 }
-
-impl fmt::Display for FieldViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidFieldId(id) => write!(f, "invalid field id {id:?}"),
-            Self::MissingTopic(id) => write!(f, "missing topic {id:?}"),
-            Self::MissingSource => write!(f, "missing source for field topic"),
-            Self::MissingTopicStore(id) => write!(f, "missing topic store for {id:?}"),
-            Self::FieldMissingFromSchema { topic, field } => {
-                write!(f, "field `{field}` is missing from schema for {topic:?}")
-            }
-        }
-    }
-}
-
-impl Error for FieldViewError {}
 
 fn ranges_overlap(a: TimeRange, b: TimeRange) -> bool {
     a.min_us <= b.max_us && b.min_us <= a.max_us

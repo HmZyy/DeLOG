@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Seek};
 use std::sync::Arc;
@@ -56,55 +55,21 @@ pub trait LogParser: Send + Sync {
 }
 
 /// Only framing/IO failures abort; record corruption is a diagnostic.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ParseError {
-    Io(io::Error),
-    Setup {
-        detail: String,
-    },
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("parser setup failed: {detail}")]
+    Setup { detail: String },
+    #[error("parser setup cancelled")]
     SetupCancelled,
-    UnsupportedFormat {
-        detail: String,
-    },
+    #[error("unsupported format: {detail}")]
+    UnsupportedFormat { detail: String },
     /// Partial data already submitted is kept.
+    #[error("parse cancelled")]
     Cancelled,
-    Framing {
-        byte_offset: u64,
-        detail: String,
-    },
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "io error: {err}"),
-            Self::Setup { detail } => write!(f, "parser setup failed: {detail}"),
-            Self::SetupCancelled => write!(f, "parser setup cancelled"),
-            Self::UnsupportedFormat { detail } => write!(f, "unsupported format: {detail}"),
-            Self::Cancelled => write!(f, "parse cancelled"),
-            Self::Framing {
-                byte_offset,
-                detail,
-            } => {
-                write!(f, "framing corruption at byte {byte_offset}: {detail}")
-            }
-        }
-    }
-}
-
-impl Error for ParseError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for ParseError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
+    #[error("framing corruption at byte {byte_offset}: {detail}")]
+    Framing { byte_offset: u64, detail: String },
 }
 
 #[derive(Clone)]

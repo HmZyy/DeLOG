@@ -1040,6 +1040,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tiny_http",
  "tracing",
  "tracing-subscriber",
@@ -1066,6 +1067,7 @@ dependencies = [
  "arrow",
  "criterion",
  "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1076,6 +1078,7 @@ dependencies = [
  "delog-core",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1100,6 +1103,7 @@ dependencies = [
  "mavlink",
  "parquet",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1148,6 +1152,7 @@ dependencies = [
  "delog-parsers",
  "mavlink",
  "serialport",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

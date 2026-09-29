@@ -245,15 +245,9 @@ impl FieldSink {
 }
 
 /// The serializer never fails; this error type exists only for the trait.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("unreachable")]
 struct Never;
-
-impl std::fmt::Display for Never {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("unreachable")
-    }
-}
-impl std::error::Error for Never {}
 impl serde::ser::Error for Never {
     fn custom<T: std::fmt::Display>(_msg: T) -> Self {
         Never
@@ -532,6 +526,13 @@ mod tests {
     use ::mavlink::{MAVLinkV1MessageRaw, MAVLinkV2MessageRaw, MavHeader};
 
     use super::*;
+
+    #[test]
+    fn never_error_contract() {
+        let error = <Never as serde::ser::Error>::custom("x");
+        assert_eq!(error.to_string(), "unreachable");
+        assert!(std::error::Error::source(&error).is_none());
+    }
 
     fn header(seq: u8) -> MavHeader {
         MavHeader {

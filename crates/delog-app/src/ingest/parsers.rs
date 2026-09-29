@@ -706,7 +706,7 @@ fn available_parser_copy_name(existing: &[String], name: &str) -> String {
             return candidate;
         }
     }
-    unreachable!()
+    unreachable!("parser copy-name suffix search must find an available .py name")
 }
 
 fn file_label(path: &Path) -> String {

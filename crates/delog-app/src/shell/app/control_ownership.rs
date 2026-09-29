@@ -277,28 +277,29 @@ mod tests {
         let mut next_vehicle_id = 1;
         let mut vehicle_revision = 7;
         let mut traj_dirty = false;
-        let mut control = AppControl {
-            markers: &mut markers,
-            workspace: &mut workspace,
-            windows: &mut windows,
-            playback: &mut playback,
-            next_window_id: &mut next_window_id,
-            caches: &mut caches,
-            snapshot: &snapshot,
-            vehicles: &mut vehicles,
-            next_vehicle_id: &mut next_vehicle_id,
-            vehicle_revision: &mut vehicle_revision,
-            traj_dirty: &mut traj_dirty,
-            vehicle_profiles: None,
-        };
-        apply_sweep(
-            &mut control,
-            &Sweep::Commit {
-                owner: "flight.py".into(),
-                generation: 2,
-            },
-        );
-        drop(control);
+        {
+            let mut control = AppControl {
+                markers: &mut markers,
+                workspace: &mut workspace,
+                windows: &mut windows,
+                playback: &mut playback,
+                next_window_id: &mut next_window_id,
+                caches: &mut caches,
+                snapshot: &snapshot,
+                vehicles: &mut vehicles,
+                next_vehicle_id: &mut next_vehicle_id,
+                vehicle_revision: &mut vehicle_revision,
+                traj_dirty: &mut traj_dirty,
+                vehicle_profiles: None,
+            };
+            apply_sweep(
+                &mut control,
+                &Sweep::Commit {
+                    owner: "flight.py".into(),
+                    generation: 2,
+                },
+            );
+        }
 
         assert_eq!(vehicles.len(), 1);
         assert_eq!(vehicles[0].label, "manual");
