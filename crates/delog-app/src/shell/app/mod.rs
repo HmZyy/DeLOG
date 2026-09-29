@@ -12,6 +12,7 @@ mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
+mod param_diff;
 #[cfg(all(test, feature = "scripting"))]
 mod sequence_tests;
 mod sequences;
@@ -532,7 +533,7 @@ pub struct DelogApp {
     /// per data change, not every frame.
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
-    source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    source_metadata_dialogs: Vec<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     text_viewers: crate::plotting::text_viewer::TextViewers,
@@ -699,7 +700,7 @@ impl DelogApp {
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
-            source_metadata_dialog: None,
+            source_metadata_dialogs: Vec::new(),
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             text_viewers: crate::plotting::text_viewer::TextViewers::default(),
@@ -2972,8 +2973,10 @@ impl DelogApp {
         if let Some(source) = response.remove_source {
             self.session.remove_source(source);
         }
-        if let Some(source) = response.inspect_source {
-            self.source_metadata_dialog = Some(source);
+        if let Some(source) = response.inspect_source
+            && !self.source_metadata_dialogs.contains(&source)
+        {
+            self.source_metadata_dialogs.push(source);
         }
         if let Some(field) = response.inspect_field_metadata {
             self.field_metadata_dialog = Some(field);
@@ -3497,7 +3500,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         if let Some(t_us) =
-            show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog)
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut self.source_metadata_dialogs)
             && let Some(range) = snapshot.global_time_range()
         {
             self.playback.scrub(t_us, range);
@@ -4119,18 +4122,30 @@ fn show_field_metadata_window(
     }
 }
 
+fn show_source_metadata_windows(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    open_sources: &mut Vec<delog_core::identity::SourceId>,
+) -> Option<i64> {
+    let mut jump_to_time_us = None;
+    open_sources.retain(|&source_id| {
+        let (open, jump) = show_source_metadata_window(ctx, snapshot, source_id);
+        jump_to_time_us = jump_to_time_us.or(jump);
+        open
+    });
+    jump_to_time_us
+}
+
 fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    selected: &mut Option<delog_core::identity::SourceId>,
-) -> Option<i64> {
-    let source_id = (*selected)?;
+    source_id: delog_core::identity::SourceId,
+) -> (bool, Option<i64>) {
     let Some(source) = snapshot
         .source(source_id)
         .filter(|source| !source.entry.removed)
     else {
-        *selected = None;
-        return None;
+        return (false, None);
     };
 
     let mut jump_to_time_us = None;
@@ -4168,10 +4183,7 @@ fn show_source_metadata_window(
             ui.data_mut(|d| d.insert_temp(tab_id, active_source_metadata_tab(&mut dock_state)));
         });
 
-    if !open {
-        *selected = None;
-    }
-    jump_to_time_us
+    (open, jump_to_time_us)
 }
 
 fn source_metadata_dock_state(active_tab: SourceMetaTab) -> egui_dock::DockState<SourceMetaTab> {
@@ -4252,29 +4264,7 @@ fn show_source_metadata_tab(
             if source.entry.meta.params.is_empty() {
                 ui.weak("No parameters captured.");
             } else {
-                let query_id = egui::Id::new(("source_param_query", source_id.0));
-                let mut query = ui
-                    .data(|d| d.get_temp::<String>(query_id))
-                    .unwrap_or_default();
-                ui.add(
-                    egui::TextEdit::singleline(&mut query)
-                        .hint_text("Filter parameters...")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
-
-                let matches: Vec<_> = source
-                    .entry
-                    .meta
-                    .params
-                    .iter()
-                    .filter(|param| crate::plotting::browser::matches_query(&query, &param.name))
-                    .collect();
-                if matches.is_empty() {
-                    ui.weak("No parameters match the filter.");
-                } else {
-                    source_metadata_params_table(ui, source_id, &matches);
-                }
+                show_source_params(ui, snapshot, source);
             }
         }
         SourceMetaTab::LoggedMessages => {
@@ -4291,6 +4281,184 @@ fn show_source_metadata_tab(
         }
     }
     None
+}
+
+fn show_source_params(
+    ui: &mut egui::Ui,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    source: &delog_core::snapshot::SourceSnapshot,
+) {
+    let source_id = source.entry.id;
+    let compare_id = egui::Id::new(("source_param_compare", source_id.0));
+    let diff_only_id = egui::Id::new(("source_param_diff_only", source_id.0));
+    let query_id = egui::Id::new(("source_param_query", source_id.0));
+
+    let candidates: Vec<_> = snapshot
+        .sources
+        .iter()
+        .filter(|candidate| {
+            candidate.entry.id != source_id
+                && !candidate.entry.removed
+                && !candidate.entry.meta.params.is_empty()
+        })
+        .collect();
+    let mut compare = ui
+        .data(|d| d.get_temp::<Option<delog_core::identity::SourceId>>(compare_id))
+        .flatten()
+        .filter(|id| candidates.iter().any(|candidate| candidate.entry.id == *id));
+    let mut diff_only = ui
+        .data(|d| d.get_temp::<bool>(diff_only_id))
+        .unwrap_or(true);
+
+    let other = compare.and_then(|id| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.entry.id == id)
+            .copied()
+    });
+    let rows = other
+        .map(|other| param_diff::diff_params(&source.entry.meta.params, &other.entry.meta.params));
+
+    let mut query = ui
+        .data(|d| d.get_temp::<String>(query_id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let compare_height = if candidates.is_empty() {
+                ui.spacing().interact_size.y
+            } else {
+                egui::ComboBox::from_id_salt(("source_param_compare_combo", source_id.0))
+                    .selected_text(
+                        other.map_or("Compare with...", |other| other.entry.label.as_str()),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut compare, None, "None");
+                        for candidate in &candidates {
+                            ui.selectable_value(
+                                &mut compare,
+                                Some(candidate.entry.id),
+                                candidate.entry.label.as_str(),
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .height()
+            };
+            if rows.is_some() {
+                ui.checkbox(&mut diff_only, "Differences only");
+            }
+            ui.add_sized(
+                [ui.available_width(), compare_height],
+                egui::TextEdit::singleline(&mut query)
+                    .id(egui::Id::new(("source_param_filter", source_id.0)))
+                    .hint_text("Filter parameters...")
+                    .vertical_align(egui::Align::Center),
+            );
+        });
+    });
+    ui.data_mut(|d| {
+        d.insert_temp(compare_id, compare);
+        d.insert_temp(diff_only_id, diff_only);
+        d.insert_temp(query_id, query.clone());
+    });
+    if let Some(rows) = &rows {
+        let counts = param_diff::diff_counts(rows);
+        ui.weak(format!(
+            "{} differ, {} only here, {} only in other",
+            counts.changed, counts.only_here, counts.only_other
+        ));
+    }
+
+    match (rows, other) {
+        (Some(rows), Some(other)) => {
+            let matches: Vec<_> = rows
+                .into_iter()
+                .filter(|row| !diff_only || row.kind != param_diff::ParamDiffKind::Same)
+                .filter(|row| crate::plotting::browser::matches_query(&query, row.name))
+                .collect();
+            if matches.is_empty() {
+                ui.weak("No parameters match.");
+            } else {
+                source_metadata_params_diff_table(
+                    ui,
+                    source_id,
+                    [source.entry.label.as_str(), other.entry.label.as_str()],
+                    &matches,
+                );
+            }
+        }
+        _ => {
+            let matches: Vec<_> = source
+                .entry
+                .meta
+                .params
+                .iter()
+                .filter(|param| crate::plotting::browser::matches_query(&query, &param.name))
+                .collect();
+            if matches.is_empty() {
+                ui.weak("No parameters match the filter.");
+            } else {
+                source_metadata_params_table(ui, source_id, &matches);
+            }
+        }
+    }
+}
+
+fn source_metadata_params_diff_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    labels: [&str; 2],
+    rows: &[param_diff::ParamDiffRow<'_>],
+) {
+    let row_height = table_row_height(ui);
+    let highlight = ui.visuals().warn_fg_color;
+    egui::ScrollArea::vertical()
+        .id_salt(("source_params_diff", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_params_diff_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(120.0))
+                .column(Column::auto().at_least(96.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    for label in labels {
+                        header.col(|ui| {
+                            ui.strong(label);
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_height, rows.len(), |mut row| {
+                        let diff = rows[row.index()];
+                        let differs = diff.kind != param_diff::ParamDiffKind::Same;
+                        row.col(|ui| {
+                            ui.monospace(diff.name);
+                        });
+                        for value in [diff.here, diff.other] {
+                            row.col(|ui| match value {
+                                Some(value) if differs => {
+                                    ui.label(egui::RichText::new(value).color(highlight));
+                                }
+                                Some(value) => {
+                                    ui.label(value);
+                                }
+                                None => {
+                                    ui.weak("-");
+                                }
+                            });
+                        }
+                    });
+                });
+        });
 }
 
 fn source_metadata_summary_table(ui: &mut egui::Ui, rows: &[(&str, String)]) {
