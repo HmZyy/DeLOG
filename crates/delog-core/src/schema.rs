@@ -2,8 +2,6 @@
 //! are applied only when a render cache is built.
 
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
 
 use arrow::datatypes::DataType;
 
@@ -30,14 +28,21 @@ pub struct TopicSchema {
     provenance: Option<TopicProvenance>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SchemaError {
+    #[error("topic name must not be empty")]
     EmptyTopicName,
+    #[error("original source must not be empty")]
     EmptyOriginalSource,
+    #[error("original topic must not be empty")]
     EmptyOriginalTopic,
+    #[error("field name must not be empty")]
     EmptyFieldName,
+    #[error("duplicate field name `{0}`")]
     DuplicateFieldName(String),
+    #[error("unsupported field dtype {0:?}")]
     UnsupportedDataType(DataType),
+    #[error("field `{field}` has non-finite multiplier {multiplier}")]
     NonFiniteMultiplier { field: String, multiplier: f64 },
 }
 
@@ -236,24 +241,6 @@ impl TopicSchema {
         self.fields.is_empty()
     }
 }
-
-impl fmt::Display for SchemaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyTopicName => write!(f, "topic name must not be empty"),
-            Self::EmptyOriginalSource => write!(f, "original source must not be empty"),
-            Self::EmptyOriginalTopic => write!(f, "original topic must not be empty"),
-            Self::EmptyFieldName => write!(f, "field name must not be empty"),
-            Self::DuplicateFieldName(name) => write!(f, "duplicate field name `{name}`"),
-            Self::UnsupportedDataType(dtype) => write!(f, "unsupported field dtype {dtype:?}"),
-            Self::NonFiniteMultiplier { field, multiplier } => {
-                write!(f, "field `{field}` has non-finite multiplier {multiplier}")
-            }
-        }
-    }
-}
-
-impl Error for SchemaError {}
 
 fn is_supported_dtype(dtype: &DataType) -> bool {
     matches!(

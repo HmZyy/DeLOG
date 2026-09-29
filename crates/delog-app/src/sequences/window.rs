@@ -480,15 +480,13 @@ impl SequenceManager {
                                                 }
                                                 if let Some(payload) =
                                                     row.dnd_release_payload::<StepDrag>()
+                                                    && payload.sequence == doc.id
+                                                    && let Some(from) = doc
+                                                        .steps
+                                                        .iter()
+                                                        .position(|s| s.id == payload.step)
                                                 {
-                                                    if payload.sequence == doc.id
-                                                        && let Some(from) = doc
-                                                            .steps
-                                                            .iter()
-                                                            .position(|s| s.id == payload.step)
-                                                    {
-                                                        movement = Some((from, index));
-                                                    }
+                                                    movement = Some((from, index));
                                                 }
                                             }
                                         });
@@ -606,10 +604,13 @@ impl SequenceManager {
                                         ui.label("Create or select a sequence.");
                                     });
                                 }
-                                if (save || run_clicked) && self.save_or_report() && run_clicked {
-                                    actions.push(ManagerAction::Run(
-                                        self.draft.as_ref().unwrap().clone(),
-                                    ));
+                                if save || run_clicked {
+                                    let saved = self.save_or_report();
+                                    if saved && run_clicked {
+                                        actions.push(ManagerAction::Run(
+                                            self.draft.as_ref().unwrap().clone(),
+                                        ));
+                                    }
                                 }
                             });
                         });
@@ -925,8 +926,10 @@ mod tests {
         source.push(StepKind::Layout, "overview");
         source.push(StepKind::Script, "prepare");
         store.save(&source).unwrap();
-        let mut manager = SequenceManager::default();
-        manager.store = Some(store);
+        let manager = SequenceManager {
+            store: Some(store),
+            ..Default::default()
+        };
         let copy = manager.duplicate(&source).unwrap();
         let second = manager.duplicate(&source).unwrap();
         assert_ne!(source.id, copy.id);
@@ -952,10 +955,12 @@ mod tests {
         let target = SequenceDoc::new("target");
         store.save(&selected).unwrap();
         store.save(&target).unwrap();
-        let mut manager = SequenceManager::default();
-        manager.store = Some(store);
-        manager.saved_name = Some(selected.name.clone());
-        manager.draft = Some(selected.clone());
+        let mut manager = SequenceManager {
+            store: Some(store),
+            saved_name: Some(selected.name.clone()),
+            draft: Some(selected.clone()),
+            ..Default::default()
+        };
         manager.library_action(components::LibraryEvent {
             name: target.name.clone(),
             action: components::LibraryAction::Remove,
@@ -1008,8 +1013,10 @@ mod tests {
     fn dragging_a_step_handle_changes_execution_order() {
         let ctx = egui::Context::default();
         egui_extras::install_image_loaders(&ctx);
-        let mut manager = SequenceManager::default();
-        manager.open = true;
+        let mut manager = SequenceManager {
+            open: true,
+            ..Default::default()
+        };
         let mut doc = SequenceDoc::new("drag-test");
         doc.push(StepKind::Script, "first");
         doc.push(StepKind::Layout, "second");
@@ -1064,8 +1071,10 @@ mod tests {
     fn step_status_indicators_line_up_whatever_the_step_reference_is() {
         let ctx = egui::Context::default();
         egui_extras::install_image_loaders(&ctx);
-        let mut manager = SequenceManager::default();
-        manager.open = true;
+        let mut manager = SequenceManager {
+            open: true,
+            ..Default::default()
+        };
         let mut doc = SequenceDoc::new("status-column");
         doc.push(StepKind::Script, "a");
         doc.push(StepKind::Layout, "a-much-longer-step-reference");

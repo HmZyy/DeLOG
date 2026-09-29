@@ -61,6 +61,7 @@ cargo build --release --locked -p delog-app --no-default-features
 
 ## Documentation
 
+- [Architecture and coding style](docs/ARCHITECTURE_AND_STYLE.md) - crate ownership, extension points, and checks for new features.
 - [Dataflow editor](docs/dataflow.md) - visual derived signals, timeline alignment, and publishing.
 - [Scripting](docs/scripting.md) - embedded-Python derived fields, the `delog` API, live transforms.
 - [Python app control](docs/app_control.md) - plots, annotations, vehicles, markers, layouts, and atomic batches.

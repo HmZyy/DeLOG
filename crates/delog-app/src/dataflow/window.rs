@@ -293,7 +293,7 @@ impl DataFlowUi {
                     self.close_editor(previous);
                 }
             }
-            Err(error) => logs.push((LogLevel::Error, error)),
+            Err(error) => logs.push((LogLevel::Error, error.to_string())),
         }
     }
 
@@ -432,10 +432,10 @@ impl DataFlowUi {
                         LogLevel::Info,
                         format!("Duplicated dataflow '{name}' as '{copy}'"),
                     )),
-                    Err(error) => logs.push((LogLevel::Error, error)),
+                    Err(error) => logs.push((LogLevel::Error, error.to_string())),
                 }
             }
-            Err(error) => logs.push((LogLevel::Error, error)),
+            Err(error) => logs.push((LogLevel::Error, error.to_string())),
         }
     }
 
@@ -471,7 +471,7 @@ impl DataFlowUi {
                         }
                         logs.push((LogLevel::Info, format!("Deleted dataflow '{name}'")));
                     }
-                    Err(error) => logs.push((LogLevel::Error, error)),
+                    Err(error) => logs.push((LogLevel::Error, error.to_string())),
                 }
             }
             self.pending_delete = None;
@@ -706,7 +706,7 @@ fn available_copy_name(existing: &[String], name: &str) -> String {
             return candidate;
         }
     }
-    unreachable!()
+    unreachable!("copy-name suffix search must find an available name")
 }
 
 #[cfg(test)]

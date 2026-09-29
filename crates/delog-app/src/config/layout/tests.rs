@@ -2,6 +2,70 @@ use super::*;
 use delog_core::identity::IdentityRegistry;
 
 #[test]
+fn layout_error_messages_remain_stable() {
+    let cases = [
+        (
+            LayoutError::from(std::io::Error::other("denied")),
+            "layout IO error: denied",
+        ),
+        (
+            LayoutError::from(serde_json::Error::io(std::io::Error::other("bad token"))),
+            "layout JSON error: bad token",
+        ),
+        (
+            LayoutError::UnsupportedVersion(99),
+            "unsupported layout version 99",
+        ),
+        (
+            LayoutError::NoStorageDir,
+            "no layout storage directory available",
+        ),
+        (
+            LayoutError::MissingVersion,
+            "layout JSON is missing `delog_layout`",
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.clone().to_string(), expected);
+    }
+}
+
+#[test]
+fn layout_error_sources_are_typed_and_cloneable() {
+    fn assert_error_and_clone<T: std::error::Error + Clone>() {}
+    assert_error_and_clone::<LayoutError>();
+
+    let json = decode_doc("{").unwrap_err();
+    assert!(
+        std::error::Error::source(&json)
+            .unwrap()
+            .downcast_ref::<serde_json::Error>()
+            .is_some()
+    );
+    assert_eq!(json.clone().to_string(), json.to_string());
+
+    let temp = tempfile::tempdir().unwrap();
+    let not_a_directory = temp.path().join("not-a-directory");
+    fs::write(&not_a_directory, "file").unwrap();
+    let io = list_layouts_in(&not_a_directory).unwrap_err();
+    assert!(
+        std::error::Error::source(&io)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .is_some()
+    );
+    assert_eq!(io.clone().to_string(), io.to_string());
+
+    let missing_parent = LayoutError::MissingParent;
+    assert_eq!(
+        missing_parent.to_string(),
+        "layout IO error: layout path has no parent"
+    );
+    assert!(std::error::Error::source(&missing_parent).is_none());
+}
+
+#[test]
 fn app_settings_round_trip_through_settings_json() {
     let path = std::env::temp_dir().join(format!(
         "delog-settings-rt-{}-{}.json",
