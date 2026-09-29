@@ -837,6 +837,216 @@ fn source_metadata_windows_stay_open_side_by_side_and_drop_removed_sources() {
     assert_eq!(open_sources, vec![second]);
 }
 
+fn source_with_params(
+    identity: &mut IdentityRegistry,
+    label: &str,
+    params: &[(&str, &str)],
+) -> delog_core::identity::SourceId {
+    let source = identity.add_source(label);
+    identity.set_source_metadata(
+        source,
+        delog_core::identity::SourceMetadata {
+            params: params
+                .iter()
+                .map(|(name, value)| delog_core::identity::SourceParam {
+                    name: (*name).to_owned(),
+                    ty: "float".to_owned(),
+                    value: (*value).to_owned(),
+                    default: None,
+                })
+                .collect(),
+            auto_markers: Vec::new(),
+        },
+    );
+    source
+}
+
+fn painted_texts(output: &egui::FullOutput) -> Vec<String> {
+    fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        collect(&clipped.shape, &mut out);
+    }
+    out
+}
+
+#[test]
+fn parameters_tab_compares_against_another_loaded_source() {
+    let mut identity = IdentityRegistry::new();
+    let here = source_with_params(
+        &mut identity,
+        "flight-a",
+        &[("ANGLE_MAX", "4500"), ("SAME_PARAM", "1"), ("ONLY_A", "7")],
+    );
+    let other = source_with_params(
+        &mut identity,
+        "flight-b",
+        &[
+            ("ANGLE_MAX", "3000"),
+            ("SAME_PARAM", "1.0"),
+            ("ONLY_B", "8"),
+        ],
+    );
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+    let mut open_sources = vec![here];
+    let ctx = egui::Context::default();
+    crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new(("source_metadata_tab", here.0)),
+            SourceMetaTab::Parameters,
+        );
+        d.insert_temp(egui::Id::new(("source_param_compare", here.0)), Some(other));
+    });
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_200.0, 800.0),
+        )),
+        ..Default::default()
+    };
+
+    let mut output = None;
+    for _ in 0..3 {
+        output = Some(ctx.run_ui(input.clone(), |ui| {
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut open_sources);
+        }));
+    }
+    let output = output.unwrap();
+    let texts = painted_texts(&output);
+
+    for expected in ["ANGLE_MAX", "4500", "3000", "ONLY_A", "ONLY_B", "flight-b"] {
+        assert!(
+            texts.iter().any(|text| text == expected),
+            "compare view should render {expected:?}, got {texts:?}"
+        );
+    }
+    assert!(
+        !texts.iter().any(|text| text == "SAME_PARAM"),
+        "identical parameters are hidden by default"
+    );
+    assert!(texts.iter().any(|text| text.contains("1 differ")));
+    let filter_row = painted_text_center_y(&output, "Filter parameters...");
+    let compare_row = painted_text_center_y(&output, "Differences only");
+    assert!(
+        (filter_row - compare_row).abs() < 2.0,
+        "compare controls share the filter row: {filter_row} vs {compare_row}"
+    );
+
+    let (filter, combo) = ctx.viewport(|viewport| {
+        let widgets = &viewport.this_pass.widgets;
+        let filter = widgets
+            .get(egui::Id::new(("source_param_filter", here.0)))
+            .expect("filter should be laid out")
+            .rect;
+        let combo = widgets
+            .layers()
+            .flat_map(|(_, rects)| rects.iter())
+            .filter(|widget| {
+                widget.sense.senses_click()
+                    && widget.rect.left() >= filter.right()
+                    && (widget.rect.center().y - filter.center().y).abs() < 2.0
+            })
+            .max_by(|a, b| a.rect.right().total_cmp(&b.rect.right()))
+            .expect("compare dropdown should sit right of the filter")
+            .rect;
+        (filter, combo)
+    });
+    assert!(
+        (filter.height() - combo.height()).abs() < 0.5,
+        "filter {filter:?} and compare dropdown {combo:?} should be the same height"
+    );
+    let filter_frame = output
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Rect(rect) => Some(rect.rect),
+            _ => None,
+        })
+        .find(|rect| (rect.left() - filter.left()).abs() < 2.0 && rect.contains(filter.center()))
+        .expect("filter frame should be painted");
+    assert!(
+        (filter_frame.height() - combo.height()).abs() < 2.0,
+        "painted filter frame {filter_frame:?} should match compare dropdown {combo:?}"
+    );
+}
+
+#[test]
+fn parameters_tab_hides_compare_when_no_other_source_has_parameters() {
+    let mut identity = IdentityRegistry::new();
+    let here = source_with_params(&mut identity, "flight-a", &[("ANGLE_MAX", "4500")]);
+    identity.add_source("flight-without-params");
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+    let mut open_sources = vec![here];
+    let ctx = egui::Context::default();
+    crate::ui::theme::ThemeChoice::CatppuccinMocha.apply(&ctx);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new(("source_metadata_tab", here.0)),
+            SourceMetaTab::Parameters,
+        );
+    });
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_200.0, 800.0),
+        )),
+        ..Default::default()
+    };
+
+    let mut output = None;
+    for _ in 0..3 {
+        output = Some(ctx.run_ui(input.clone(), |ui| {
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut open_sources);
+        }));
+    }
+    let output = output.unwrap();
+    let texts = painted_texts(&output);
+
+    assert!(texts.iter().any(|text| text == "ANGLE_MAX"));
+    assert!(
+        !texts.iter().any(|text| text == "Compare with..."),
+        "compare dropdown should not be shown, got {texts:?}"
+    );
+    let filter = ctx
+        .viewport(|viewport| {
+            viewport
+                .this_pass
+                .widgets
+                .get(egui::Id::new(("source_param_filter", here.0)))
+                .map(|widget| widget.rect)
+        })
+        .expect("filter should be laid out");
+    let control_height = ctx.global_style().spacing.interact_size.y;
+    assert!(
+        (filter.height() - control_height).abs() < 0.5,
+        "filter {filter:?} keeps the control height {control_height}"
+    );
+}
+
+fn painted_text_center_y(output: &egui::FullOutput, expected: &str) -> f32 {
+    fn find(shape: &egui::epaint::Shape, expected: &str) -> Option<f32> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.visual_bounding_rect().center().y)
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, expected)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| find(&clipped.shape, expected))
+        .unwrap_or_else(|| panic!("{expected:?} should be painted"))
+}
+
 #[test]
 fn provisional_visible_stats_reconstructs_absolute_minmax() {
     let mut identity = IdentityRegistry::new();
@@ -905,9 +1115,10 @@ fn source_metadata_tables_use_resizable_table_builders() {
     assert!(source_metadata.contains("source_metadata_summary_table"));
     assert!(source_metadata.contains("source_metadata_params_table"));
     assert!(source_metadata.contains("source_metadata_markers_table"));
-    assert_eq!(source_metadata.matches("TableBuilder::new(ui)").count(), 3);
-    assert_eq!(source_metadata.matches(".resizable(true)").count(), 3);
-    assert!(source_metadata.matches("Column::remainder()").count() >= 3);
+    assert!(source_metadata.contains("source_metadata_params_diff_table"));
+    assert_eq!(source_metadata.matches("TableBuilder::new(ui)").count(), 4);
+    assert_eq!(source_metadata.matches(".resizable(true)").count(), 4);
+    assert!(source_metadata.matches("Column::remainder()").count() >= 4);
     assert!(!source_metadata.contains("egui::Grid::new"));
 }
 
