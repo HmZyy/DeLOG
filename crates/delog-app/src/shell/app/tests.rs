@@ -796,6 +796,48 @@ fn imported_provenance_is_rendered_in_the_existing_field_metadata_window() {
 }
 
 #[test]
+fn source_metadata_windows_stay_open_side_by_side_and_drop_removed_sources() {
+    let mut identity = IdentityRegistry::new();
+    let first = identity.add_source("flight-a");
+    let second = identity.add_source("flight-b");
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+    let mut open_sources = vec![first, second];
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1_200.0, 800.0),
+        )),
+        ..Default::default()
+    };
+
+    let mut output = None;
+    for _ in 0..3 {
+        output = Some(ctx.run_ui(input.clone(), |ui| {
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut open_sources);
+        }));
+    }
+    let output = output.unwrap();
+    for expected in ["Source Metadata - flight-a", "Source Metadata - flight-b"] {
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|clipped| shape_contains_text(&clipped.shape, expected)),
+            "should render {expected:?}"
+        );
+    }
+    assert_eq!(open_sources, vec![first, second]);
+
+    identity.remove_source(first);
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 2).unwrap();
+    let _ = ctx.run_ui(input, |ui| {
+        show_source_metadata_windows(ui.ctx(), &snapshot, &mut open_sources);
+    });
+    assert_eq!(open_sources, vec![second]);
+}
+
+#[test]
 fn provisional_visible_stats_reconstructs_absolute_minmax() {
     let mut identity = IdentityRegistry::new();
     let source = identity.add_source("flight");
@@ -837,7 +879,7 @@ fn provisional_visible_stats_reconstructs_absolute_minmax() {
 fn source_metadata_tabs_use_egui_dock() {
     let source = include_str!("mod.rs");
     let source_metadata = source
-        .split("fn show_source_metadata_window")
+        .split("fn show_source_metadata_window(")
         .nth(1)
         .expect("source metadata window should exist")
         .split("fn show_source_metadata_tab")
