@@ -532,7 +532,7 @@ pub struct DelogApp {
     /// per data change, not every frame.
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
-    source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    source_metadata_dialogs: Vec<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     text_viewers: crate::plotting::text_viewer::TextViewers,
@@ -699,7 +699,7 @@ impl DelogApp {
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
-            source_metadata_dialog: None,
+            source_metadata_dialogs: Vec::new(),
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             text_viewers: crate::plotting::text_viewer::TextViewers::default(),
@@ -2972,8 +2972,10 @@ impl DelogApp {
         if let Some(source) = response.remove_source {
             self.session.remove_source(source);
         }
-        if let Some(source) = response.inspect_source {
-            self.source_metadata_dialog = Some(source);
+        if let Some(source) = response.inspect_source
+            && !self.source_metadata_dialogs.contains(&source)
+        {
+            self.source_metadata_dialogs.push(source);
         }
         if let Some(field) = response.inspect_field_metadata {
             self.field_metadata_dialog = Some(field);
@@ -3497,7 +3499,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         if let Some(t_us) =
-            show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog)
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut self.source_metadata_dialogs)
             && let Some(range) = snapshot.global_time_range()
         {
             self.playback.scrub(t_us, range);
@@ -4119,18 +4121,30 @@ fn show_field_metadata_window(
     }
 }
 
+fn show_source_metadata_windows(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    open_sources: &mut Vec<delog_core::identity::SourceId>,
+) -> Option<i64> {
+    let mut jump_to_time_us = None;
+    open_sources.retain(|&source_id| {
+        let (open, jump) = show_source_metadata_window(ctx, snapshot, source_id);
+        jump_to_time_us = jump_to_time_us.or(jump);
+        open
+    });
+    jump_to_time_us
+}
+
 fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    selected: &mut Option<delog_core::identity::SourceId>,
-) -> Option<i64> {
-    let source_id = (*selected)?;
+    source_id: delog_core::identity::SourceId,
+) -> (bool, Option<i64>) {
     let Some(source) = snapshot
         .source(source_id)
         .filter(|source| !source.entry.removed)
     else {
-        *selected = None;
-        return None;
+        return (false, None);
     };
 
     let mut jump_to_time_us = None;
@@ -4168,10 +4182,7 @@ fn show_source_metadata_window(
             ui.data_mut(|d| d.insert_temp(tab_id, active_source_metadata_tab(&mut dock_state)));
         });
 
-    if !open {
-        *selected = None;
-    }
-    jump_to_time_us
+    (open, jump_to_time_us)
 }
 
 fn source_metadata_dock_state(active_tab: SourceMetaTab) -> egui_dock::DockState<SourceMetaTab> {
