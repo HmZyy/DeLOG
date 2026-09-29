@@ -9,6 +9,12 @@ use delog_flow::script::{ScriptInputSpec, ScriptOutputSpec};
 use std::collections::HashSet;
 
 #[test]
+fn dataflow_copy_names_skip_existing_suffixes() {
+    let existing = vec!["name_copy".to_owned(), "name_copy_2".to_owned()];
+    assert_eq!(available_copy_name(&existing, "name"), "name_copy_3");
+}
+
+#[test]
 fn opening_and_viewing_a_saved_flow_closes_without_save_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let mut flow = DataFlowUi::new();

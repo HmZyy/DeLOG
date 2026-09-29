@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,16 @@ use crate::ui::diagnostics::DiagnosticsDock;
 use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
+
+fn load_headless_graph(
+    name: &str,
+    dir: Option<PathBuf>,
+) -> Result<delog_flow::graph::Graph, String> {
+    let dir = dir.ok_or_else(|| "application data directory is unavailable".to_owned())?;
+    crate::dataflow::store::GraphStore::new(dir)
+        .load(name)
+        .map_err(|error| error.to_string())
+}
 
 fn data_browser_panel(preferred_width: f32) -> egui::Panel {
     egui::Panel::left("data_browser_expanded")
@@ -2493,9 +2504,7 @@ impl DelogApp {
     }
 
     fn start_headless_dataflow(&mut self, name: &str) {
-        let graph = crate::dataflow::store::GraphStore::default_dir()
-            .ok_or_else(|| "application data directory is unavailable".to_owned())
-            .and_then(|dir| crate::dataflow::store::GraphStore::new(dir).load(name));
+        let graph = load_headless_graph(name, crate::dataflow::store::GraphStore::default_dir());
         let graph = match graph {
             Ok(graph) => graph,
             Err(error) => {

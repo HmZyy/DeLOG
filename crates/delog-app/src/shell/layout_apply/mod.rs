@@ -46,6 +46,10 @@ pub struct PendingLayout {
     ambiguities: Vec<AmbiguousField>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "layout outcomes stay by value to avoid allocation in the UI path"
+)]
 pub enum LoadOutcome {
     Applied(LayoutApply),
     NeedsMapping(PendingLayout),

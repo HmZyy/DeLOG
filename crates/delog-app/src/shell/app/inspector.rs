@@ -139,7 +139,7 @@ fn trace_table_ui(
                 let trace = &traces[row.index()];
                 row.col(|ui| {
                     ui.horizontal(|ui| {
-                        color_swatch(ui, trace.color);
+                        crate::ui::components::color_swatch(ui, trace.color, 10.0);
                         ui.label(&trace.label);
                     });
                 });
@@ -211,11 +211,6 @@ fn format_sample(value: SampleValue<'_>, snapshot: &StoreSnapshot, field: FieldI
             "--".to_owned()
         }
     }
-}
-
-fn color_swatch(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn property(ui: &mut egui::Ui, label: &str, value: impl ToString) {

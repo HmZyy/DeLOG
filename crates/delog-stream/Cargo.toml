@@ -16,6 +16,7 @@ arrow = { workspace = true }
 mavlink = { workspace = true }
 serialport = { workspace = true }
 crossbeam-channel = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Build raw v1/v2 frames in tests without a live link.

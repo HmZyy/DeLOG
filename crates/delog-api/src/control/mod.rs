@@ -31,6 +31,10 @@ use crate::{Error, Result};
 const WRONG_RESPONSE: &str = "the DeLOG window answered with the wrong kind of result";
 
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "control messages stay by value to avoid allocation on every dispatch"
+)]
 pub enum ControlRequest {
     Markers(MarkerRequest),
     Plots(PlotRequest),
@@ -46,6 +50,10 @@ pub enum ControlRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "control replies stay by value to avoid allocation on every dispatch"
+)]
 pub enum ControlResponse {
     Unit,
     Plots(Vec<PlotInfo>),

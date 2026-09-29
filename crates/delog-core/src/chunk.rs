@@ -1,8 +1,5 @@
 //! Immutable Arrow chunk storage.
 
-use std::error::Error;
-use std::fmt;
-
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
@@ -30,26 +27,27 @@ pub struct Chunk {
     pub t_max: TimestampUs,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ChunkError {
+    #[error("chunk must contain at least one row")]
     EmptyChunk,
-    NullTimestamp {
-        index: usize,
-    },
+    #[error("timestamp at row {index} is null")]
+    NullTimestamp { index: usize },
+    #[error("timestamp regression at row {index}: {current} < previous {previous}")]
     TimestampRegression {
         index: usize,
         previous: TimestampUs,
         current: TimestampUs,
     },
-    ColumnCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    #[error("column count mismatch: expected {expected}, got {actual}")]
+    ColumnCountMismatch { expected: usize, actual: usize },
+    #[error("column {column} length mismatch: expected {expected}, got {actual}")]
     ColumnLengthMismatch {
         column: usize,
         expected: usize,
         actual: usize,
     },
+    #[error("column {column} type mismatch: expected {expected:?}, got {actual:?}")]
     ColumnTypeMismatch {
         column: usize,
         expected: DataType,
@@ -122,47 +120,6 @@ impl ColStats {
         self.nan_count += 1;
     }
 }
-
-impl fmt::Display for ChunkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyChunk => write!(f, "chunk must contain at least one row"),
-            Self::NullTimestamp { index } => write!(f, "timestamp at row {index} is null"),
-            Self::TimestampRegression {
-                index,
-                previous,
-                current,
-            } => write!(
-                f,
-                "timestamp regression at row {index}: {current} < previous {previous}"
-            ),
-            Self::ColumnCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "column count mismatch: expected {expected}, got {actual}"
-                )
-            }
-            Self::ColumnLengthMismatch {
-                column,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "column {column} length mismatch: expected {expected}, got {actual}"
-            ),
-            Self::ColumnTypeMismatch {
-                column,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "column {column} type mismatch: expected {expected:?}, got {actual:?}"
-            ),
-        }
-    }
-}
-
-impl Error for ChunkError {}
 
 fn validate_time(t: &Int64Array) -> Result<(), ChunkError> {
     if t.is_empty() {

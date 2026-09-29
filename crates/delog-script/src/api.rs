@@ -1140,7 +1140,7 @@ delog.add_marker(44, "rgba", color="#11223344")
                     "TypeError" => {
                         assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py))
                     }
-                    _ => unreachable!(),
+                    _ => unreachable!("test cases expect only ValueError or TypeError"),
                 }
                 assert!(markers.borrow().is_empty(), "staged rejected call: {call}");
             }

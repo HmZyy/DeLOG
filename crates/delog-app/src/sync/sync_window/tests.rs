@@ -1186,6 +1186,26 @@ fn tiny_lane_rejects_pointer_projection() {
 }
 
 #[test]
+fn offset_parse_errors_are_displayable() {
+    fn assert_error<T: std::error::Error + Copy>() {}
+    assert_error::<OffsetParseError>();
+
+    for (error, message) in [
+        (OffsetParseError::Syntax, "invalid offset syntax"),
+        (OffsetParseError::Number, "invalid offset number"),
+        (OffsetParseError::Unit, "invalid offset unit"),
+        (OffsetParseError::NonFinite, "offset must be finite"),
+        (
+            OffsetParseError::FractionalMicrosecond,
+            "offset must resolve to whole microseconds",
+        ),
+        (OffsetParseError::Overflow, "offset is out of range"),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[test]
 fn exact_offset_parser_supports_required_units() {
     assert_eq!(parse_offset_us("500 us"), Ok(500));
     assert_eq!(parse_offset_us("-250 ms"), Ok(-250_000));

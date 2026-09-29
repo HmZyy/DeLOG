@@ -125,7 +125,7 @@ mod tests {
                 assert!(
                     labels
                         .iter()
-                        .any(|text| text.contains("Filter minimum must"))
+                        .any(|text| text.contains("filter minimum must"))
                 );
             }
         }

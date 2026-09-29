@@ -13,6 +13,20 @@ use super::*;
 use crate::shell::windows::{ExtendedWindow, WindowId};
 
 #[test]
+fn headless_graph_loading_preserves_text_boundary() {
+    assert_eq!(
+        load_headless_graph("missing", None).unwrap_err(),
+        "application data directory is unavailable"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let error = load_headless_graph("missing", Some(dir.path().to_path_buf())).unwrap_err();
+    assert!(error.starts_with(&format!(
+        "failed to read '{}': ",
+        dir.path().join("missing.json").display()
+    )));
+}
+
+#[test]
 fn data_browser_toggle_from_main_changes_only_main_state() {
     let mut main_collapsed = true;
     let mut main_focus_filter = false;
