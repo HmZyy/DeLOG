@@ -61,9 +61,22 @@ fn app_native_options() -> eframe::NativeOptions {
     };
     options.wgpu_options.present_mode = present_mode.present_mode();
     options.wgpu_options.on_surface_status = std::sync::Arc::new(surface_status_action);
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        let base = std::sync::Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor =
+            std::sync::Arc::new(move |adapter| eframe::wgpu::DeviceDescriptor {
+                memory_hints: eframe::wgpu::MemoryHints::Manual {
+                    suballocated_device_memory_block_size: STAGING_SAFE_BLOCK_SIZE
+                        ..STAGING_SAFE_BLOCK_SIZE,
+                },
+                ..base(adapter)
+            });
+    }
 
     options
 }
+
+const STAGING_SAFE_BLOCK_SIZE: u64 = 512 << 20;
 
 fn surface_status_action(
     status: &eframe::wgpu::CurrentSurfaceTexture,
@@ -175,5 +188,36 @@ mod surface_status_tests {
     #[test]
     fn a_validation_failure_is_still_skipped() {
         assert!(skips_quietly(&CurrentSurfaceTexture::Validation));
+    }
+}
+
+#[cfg(test)]
+mod native_options_tests {
+    use super::app_native_options;
+    use eframe::egui_wgpu::WgpuSetup;
+    use eframe::wgpu;
+
+    #[test]
+    fn device_uses_host_blocks_larger_than_a_non_resizable_bar_heap() {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let WgpuSetup::CreateNew(setup) = app_native_options().wgpu_options.wgpu_setup else {
+            panic!("expected a new wgpu setup");
+        };
+        let descriptor = (setup.device_descriptor)(&adapter);
+        match descriptor.memory_hints {
+            wgpu::MemoryHints::Manual {
+                suballocated_device_memory_block_size,
+            } => assert_eq!(
+                suballocated_device_memory_block_size,
+                (512 << 20)..(512 << 20)
+            ),
+            other => panic!("unexpected memory hints {other:?}"),
+        }
+        assert_eq!(descriptor.required_limits.max_texture_dimension_2d, 8192);
     }
 }

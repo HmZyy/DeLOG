@@ -1035,6 +1035,7 @@ dependencies = [
  "glam",
  "image",
  "parquet",
+ "pollster",
  "reqwest",
  "rfd",
  "serde",
