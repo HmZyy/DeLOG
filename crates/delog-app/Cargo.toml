@@ -75,4 +75,5 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+pollster = { workspace = true }
 tiny_http = { workspace = true }
