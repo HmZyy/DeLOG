@@ -497,6 +497,20 @@ mod tests {
     }
 
     #[test]
+    fn new_plot_window_presents_ctrl_n_as_its_shortcut() {
+        let presentation = present_commands(
+            &CommandContext::default(),
+            &PresentationState::default(),
+            [],
+        )
+        .into_iter()
+        .find(|entry| entry.command == AppCommand::Static(CommandId::NewPlotWindow))
+        .expect("new plot window should be available in the command catalog");
+
+        assert_eq!(presentation.shortcut, Some("Ctrl+N"));
+    }
+
+    #[test]
     fn context_sensitive_commands_explain_why_they_are_disabled() {
         let empty = CommandContext::default();
         assert!(matches!(

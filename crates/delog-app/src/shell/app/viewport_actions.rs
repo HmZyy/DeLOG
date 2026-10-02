@@ -20,6 +20,7 @@ pub(crate) const SHORTCUT_KEYS: &[egui::Key] = &[
     egui::Key::E,
     egui::Key::T,
     egui::Key::O,
+    egui::Key::N,
     egui::Key::Equals,
 ];
 
@@ -47,6 +48,7 @@ pub(crate) fn shortcut_for_key(
         (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
         (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),
         (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
+        (egui::Key::N, true) => Some((CommandId::NewPlotWindow, WhenKeyboardIsFree)),
         (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
         (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
         (egui::Key::F3, _) => Some((CommandId::OpenMarkers, Anywhere)),
@@ -371,6 +373,28 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_n_opens_a_new_plot_window_from_the_focused_viewport() {
+        let ctx = egui::Context::default();
+        let origin = WindowId(7);
+
+        let actions = collect_frame(
+            &ctx,
+            origin.viewport_id(),
+            true,
+            origin,
+            vec![key_press(egui::Key::N, egui::Modifiers::COMMAND)],
+        );
+
+        assert_eq!(
+            actions,
+            vec![ViewportAction::Shortcut(CommandInvocation::new(
+                origin,
+                AppCommand::Static(CommandId::NewPlotWindow),
+            ))]
+        );
+    }
+
+    #[test]
     fn unfocused_viewport_emits_no_shortcut_actions() {
         let ctx = egui::Context::default();
         let origin = WindowId(3);
@@ -450,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn extended_text_focus_suppresses_typed_shortcuts_but_not_ctrl_e() {
+    fn extended_text_focus_suppresses_ctrl_n_but_not_ctrl_e() {
         fn frame(
             ctx: &egui::Context,
             text: &mut String,
@@ -505,6 +529,14 @@ mod tests {
         );
         assert!(typed.is_empty());
         assert_eq!(text, " ");
+
+        let ctrl_n = frame(
+            &ctx,
+            &mut text,
+            false,
+            vec![key_press(egui::Key::N, egui::Modifiers::COMMAND)],
+        );
+        assert!(ctrl_n.is_empty());
 
         let toggled = frame(
             &ctx,
