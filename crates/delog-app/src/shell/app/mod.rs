@@ -1288,6 +1288,7 @@ impl DelogApp {
     }
 
     fn lock_to_live(&mut self, range: TimeRange) {
+        self.fit_view_all = false;
         self.playback.lock_to_live(range);
         self.pin_view_to_live(range);
     }
@@ -1297,7 +1298,17 @@ impl DelogApp {
             .view
             .map(|view| view.span_us())
             .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
-        self.view = Some(ViewX::locked_to_tail(range, span));
+        self.view = Some(if self.playback.live {
+            ViewX::locked_to_tail(range, span)
+        } else {
+            ViewX::ending_at(self.playback.t_us, span)
+        });
+    }
+
+    fn follow_playhead_view(&mut self, has_data: bool, range: TimeRange) {
+        if has_data && !self.fit_view_all && self.playback.follow_live {
+            self.pin_view_to_live(range);
+        }
     }
 
     fn clear_current_layout(&mut self) {
@@ -3093,12 +3104,11 @@ impl eframe::App for DelogApp {
 
             // Advance the playhead - the single time authority.
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
+            self.playback.live = self.session.has_live_links();
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
             if self.fit_view_all {
                 self.view = Some(ViewX::from_range(range));
-            } else if self.session.has_live_links() && self.playback.follow_live {
-                self.pin_view_to_live(range);
             }
 
             // Idle-aware repaint: keep frames continuous only while playing or
@@ -3601,12 +3611,14 @@ impl eframe::App for DelogApp {
         } else {
             Vec::new()
         };
+        self.follow_playhead_view(global_range.is_some(), range);
         let extended_actions =
             self.render_extended_windows(&windows_ctx, frame, &snapshot, &extended_palette_entries);
         for action in extended_actions {
             self.apply_viewport_action(action, &windows_ctx, frame, &snapshot, range);
         }
 
+        self.follow_playhead_view(global_range.is_some(), range);
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         let mut main_workspace = std::mem::replace(
             &mut self.workspace,
