@@ -1477,3 +1477,23 @@ fn tile_fog_tracks_whichever_backdrop_the_scene_is_drawing() {
     assert_eq!(super::tile_fog_rgb(true), delog_render::HORIZON_RGB);
     assert_eq!(super::tile_fog_rgb(false), super::SCENE_CLEAR_RGB);
 }
+
+#[test]
+fn pane_viewport_matches_the_gpu_viewport_egui_sets() {
+    for ppp in [1.0_f32, 1.25, 1.5, 2.0] {
+        for left in [0.0_f32, 10.3, 10.5, 33.7] {
+            for width in [600.0_f32, 600.4, 600.6] {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(left, left * 0.5),
+                    egui::vec2(width, width * 0.25),
+                );
+                let gpu = egui::epaint::ViewportInPixels::from_points(&rect, ppp, [10_000, 10_000]);
+                assert_eq!(
+                    pane_viewport_px(rect, ppp),
+                    [gpu.width_px as f32, gpu.height_px as f32],
+                    "ppp {ppp} rect {rect:?}"
+                );
+            }
+        }
+    }
+}

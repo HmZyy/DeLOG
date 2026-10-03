@@ -378,10 +378,7 @@ impl GpuBridge {
         };
 
         let ppp = ui.ctx().pixels_per_point();
-        let viewport_px = [
-            (plot_rect.width() * ppp).max(1.0),
-            (plot_rect.height() * ppp).max(1.0),
-        ];
+        let viewport_px = pane_viewport_px(plot_rect, ppp);
         let (x0, x1) = view.x_range;
         let (y0, y1) = view.y_range;
 
@@ -920,6 +917,14 @@ fn isolated_points_xy(xy: &[f32], threshold: f32) -> Vec<f32> {
         }
     }
     out
+}
+
+fn pane_viewport_px(rect: egui::Rect, ppp: f32) -> [f32; 2] {
+    let px = |v: f32| (v * ppp).round();
+    [
+        (px(rect.max.x) - px(rect.min.x)).max(1.0),
+        (px(rect.max.y) - px(rect.min.y)).max(1.0),
+    ]
 }
 
 fn trace_gap_mode(trace: TraceMode, mode: GapMode) -> GapMode {
