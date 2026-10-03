@@ -238,7 +238,9 @@ impl DelogApp {
                         self.playback.scrub(t_us, range);
                     }
                     if actions.view_changed {
-                        self.playback.unlock_live();
+                        if actions.view_moved || self.playback.live {
+                            self.playback.unlock_live();
+                        }
                         // Manual pan/zoom drops out of fit-all (like a scrub
                         // disengages live-follow).
                         self.fit_view_all = false;
