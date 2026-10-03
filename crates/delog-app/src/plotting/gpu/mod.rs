@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use delog_cache::{CacheManager, GapBehavior, TraceGeometry};
+use delog_cache::{CacheManager, GapBehavior, TraceCache, TraceGeometry};
 use delog_core::identity::FieldId;
 use delog_core::metrics::MetricsRegistry;
 use delog_render::{
@@ -10,7 +10,7 @@ use delog_render::{
     GridUniform, LinePipeline, MAP_TILE_CAPACITY, MapTileDrawGroups, MapTilePipeline,
     MapTileUniform, MapTileUpload, MeshGpu, MeshPipeline, MeshUniform, MinMaxColPipeline,
     PlotUniform, RenderContext, ScatterPipeline, Scene3dTarget, SkyPipeline, SkyUniform,
-    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing,
+    StepPipeline, Traj3dPipeline, Traj3dUniform, UniformRing, UploadStat,
 };
 use eframe::{egui_wgpu, wgpu};
 
@@ -498,36 +498,15 @@ impl GpuBridge {
                                 count: width as u32,
                             }
                         } else {
-                            let (aw, bw) = cache.finite_window(x0, x1);
-                            let key = WinKey {
-                                a: aw,
-                                b: bw,
-                                len: cache.samples(),
-                                threshold: gap_threshold.to_bits(),
-                            };
-                            if res.win_params.get(&trace.field) != Some(&key) {
-                                let line_xy = line_window_xy(&cache.xy, aw, bw);
-                                let stat = res.win_buffers.sync(trace.field, &line_xy, true);
-                                if line_xy.is_empty() {
-                                    res.win_buffers.remove(trace.field);
-                                }
-                                upload_bytes += stat.bytes;
-                                full_uploads += stat.full_upload as u64;
-                                res.win_params.insert(trace.field, key);
-                                // Only Cut removes gap segments, so only Cut can
-                                // strand a lone sample; Connect/Dotted keep it on
-                                // the (solid/dashed) line.
-                                let iso = if tuning.gap_mode == GapMode::Cut {
-                                    isolated_points_xy(&line_xy, gap_threshold)
-                                } else {
-                                    Vec::new()
-                                };
-                                if iso.is_empty() {
-                                    res.iso_buffers.remove(trace.field);
-                                } else {
-                                    res.iso_buffers.sync(trace.field, &iso, true);
-                                }
-                            }
+                            let stat = res.sync_window(
+                                trace.field,
+                                cache,
+                                (x0, x1),
+                                gap_mode,
+                                gap_threshold,
+                            );
+                            upload_bytes += stat.bytes;
+                            full_uploads += stat.full_upload as u64;
                             DrawKind::Line {
                                 samples: res.win_buffers.samples(trace.field) as u32,
                             }
@@ -540,9 +519,12 @@ impl GpuBridge {
                         }
                     }
                     TraceMode::Step => {
-                        res.buffers.sync(trace.field, &cache.xy, false);
+                        let stat =
+                            res.sync_window(trace.field, cache, (x0, x1), gap_mode, gap_threshold);
+                        upload_bytes += stat.bytes;
+                        full_uploads += stat.full_upload as u64;
                         DrawKind::Step {
-                            samples: res.buffers.samples(trace.field) as u32,
+                            samples: res.win_buffers.samples(trace.field) as u32,
                         }
                     }
                 };
@@ -1060,9 +1042,51 @@ struct WinKey {
     len: usize,
     /// Effective gap threshold bits; drives isolated-point extraction.
     threshold: u32,
+    mode: u32,
 }
 
 impl PlotCallbackResources {
+    fn sync_window(
+        &mut self,
+        field: FieldId,
+        cache: &TraceCache,
+        (x0, x1): (f32, f32),
+        gap_mode: GapMode,
+        gap_threshold: f32,
+    ) -> UploadStat {
+        let (a, b) = cache.finite_window(x0, x1);
+        let key = WinKey {
+            a,
+            b,
+            len: cache.samples(),
+            threshold: gap_threshold.to_bits(),
+            mode: gap_mode_u32(gap_mode),
+        };
+        if self.win_params.get(&field) == Some(&key) {
+            return UploadStat::default();
+        }
+        let line_xy = line_window_xy(&cache.xy, a, b);
+        let stat = self.win_buffers.sync(field, &line_xy, true);
+        if line_xy.is_empty() {
+            self.win_buffers.remove(field);
+        }
+        self.win_params.insert(field, key);
+        // Only Cut removes gap segments, so only Cut can
+        // strand a lone sample; Connect/Dotted keep it on
+        // the (solid/dashed) line.
+        let iso = if gap_mode == GapMode::Cut {
+            isolated_points_xy(&line_xy, gap_threshold)
+        } else {
+            Vec::new()
+        };
+        if iso.is_empty() {
+            self.iso_buffers.remove(field);
+        } else {
+            self.iso_buffers.sync(field, &iso, true);
+        }
+        stat
+    }
+
     fn new(ctx: RenderContext, color_format: wgpu::TextureFormat) -> Self {
         let line = LinePipeline::new(&ctx, color_format);
         let scatter = ScatterPipeline::new(&ctx, color_format);
@@ -1788,7 +1812,7 @@ impl egui_wgpu::CallbackTrait for ScenePaintCallback {
                         }
                     }
                     DrawKind::Step { .. } => {
-                        if let Some(buf) = buffers.buffer(item.field) {
+                        if let Some(buf) = win_buffers.buffer(item.field) {
                             step_binds.insert(item.field, step.bind_group(ctx, buf, uniforms));
                         }
                     }
