@@ -490,17 +490,19 @@ impl TraceCache {
         if n < 2 {
             return MinMax::EMPTY;
         }
-        let (a, b) = self.index_range(x0, x1);
-        let start = a.saturating_sub(1);
-        let end = b.min(n - 1);
+        let (lo, hi) = self.finite_window(x0, x1);
         let mut range = MinMax::EMPTY;
-        for i in start..end {
-            let (p0x, p0y) = (self.x_at(i), self.xy[2 * i + 1]);
-            let (p1x, p1y) = (self.x_at(i + 1), self.xy[2 * (i + 1) + 1]);
-            if !(p0x.is_finite() && p0y.is_finite() && p1x.is_finite() && p1y.is_finite())
-                || p1x < x0
-                || p0x > x1
-            {
+        let mut prev: Option<usize> = None;
+        for i in lo..hi {
+            if !(self.x_at(i).is_finite() && self.xy[2 * i + 1].is_finite()) {
+                continue;
+            }
+            let Some(p) = prev.replace(i) else {
+                continue;
+            };
+            let (p0x, p0y) = (self.x_at(p), self.xy[2 * p + 1]);
+            let (p1x, p1y) = (self.x_at(i), self.xy[2 * i + 1]);
+            if p1x < x0 || p0x > x1 {
                 continue;
             }
             let is_gap = gaps.is_gap(p1x - p0x);
@@ -1079,6 +1081,27 @@ mod tests {
         let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
 
         let mm = cache.visible_y_range(5.0, 11.0, TraceGeometry::Step, GapBehavior::Connect);
+
+        assert_eq!(
+            mm,
+            MinMax {
+                min: 0.0,
+                max: 100.0
+            }
+        );
+    }
+
+    #[test]
+    fn step_holds_previous_value_across_null_rows() {
+        let cache = cache_from_xy(&[
+            (0.0, 100.0),
+            (5.0, f32::NAN),
+            (6.0, f32::NAN),
+            (10.0, 0.0),
+            (11.0, 1.0),
+        ]);
+
+        let mm = cache.visible_y_range(7.0, 11.0, TraceGeometry::Step, GapBehavior::Connect);
 
         assert_eq!(
             mm,
