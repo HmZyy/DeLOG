@@ -18,6 +18,8 @@ struct VsOut {
     // flag; phase from the start keeps the dashes locked to the line on pan.
     @location(1) along: f32,
     @location(2) dash: f32,
+    @location(3) dist: f32,
+    @location(4) half_w: f32,
 };
 
 const DASH_PERIOD_PX: f32 = 8.0;
@@ -58,6 +60,8 @@ fn degenerate() -> VsOut {
     out.color = vec4<f32>(0.0);
     out.along = 0.0;
     out.dash = 0.0;
+    out.dist = 0.0;
+    out.half_w = 0.0;
     return out;
 }
 
@@ -113,32 +117,39 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
         return degenerate();
     }
 
-    let n = vec2<f32>(-delta.y, delta.x) * (width_px * 0.5 / len);
+    let aa = max(u.view.w, 0.0);
+    let dir = delta / len;
+    let perp = vec2<f32>(-dir.y, dir.x);
+    let half_w = width_px * 0.5;
+    let off_mag = half_w + aa;
 
-    var base = b;
-    var along = len;
+    var base = b + dir * half_w;
+    var along = len + half_w;
     if (corner == 0u || corner == 1u || corner == 4u) {
-        base = a;
-        along = 0.0;
+        base = a - dir * half_w;
+        along = -half_w;
     }
 
-    var offset = -n;
+    var signed = -off_mag;
     if (corner == 1u || corner == 4u || corner == 5u) {
-        offset = n;
+        signed = off_mag;
     }
 
     var out: VsOut;
-    out.pos = vec4<f32>(screen_to_clip(base + offset, viewport), 0.0, 1.0);
+    out.pos = vec4<f32>(screen_to_clip(base + perp * signed, viewport), 0.0, 1.0);
     out.color = u.color;
     out.along = along;
     out.dash = dash;
+    out.dist = signed;
+    out.half_w = half_w;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var cov = clamp(in.half_w + 0.5 - abs(in.dist), 0.0, 1.0);
     if (in.dash > 0.5 && fract(in.along / DASH_PERIOD_PX) >= DASH_ON_PX / DASH_PERIOD_PX) {
-        return vec4<f32>(0.0);
+        cov = 0.0;
     }
-    return in.color;
+    return vec4<f32>(in.color.rgb, in.color.a * cov);
 }

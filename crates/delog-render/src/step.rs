@@ -242,4 +242,76 @@ mod tests {
             "diagonal midpoint should remain clear"
         );
     }
+
+    #[test]
+    fn horizontal_and_vertical_legs_carry_the_same_ink() {
+        let Some(ctx) = RenderContext::headless() else {
+            eprintln!("no wgpu adapter - skipping step pipeline test");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let target = OffscreenTarget::new(ctx.clone(), w, h);
+        let pipeline = StepPipeline::new(&ctx, target.format());
+
+        let points = [0.0_f32, 20.3, 41.0, 50.0];
+        let xy = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("step-test-xy"),
+            size: std::mem::size_of_val(&points) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue()
+            .write_buffer(&xy, 0, bytemuck::cast_slice(&points));
+
+        let uniforms = UniformRing::new(ctx.clone(), 1);
+        uniforms.write(
+            0,
+            &PlotUniform::from_view(
+                (0.0, w as f32),
+                (0.0, h as f32),
+                [w as f32, h as f32],
+                1.5,
+                [0.0, 0.0, 1.0, 1.0],
+            )
+            .with_aa(1.0),
+        );
+        let bind = pipeline.bind_group(&ctx, &xy, &uniforms);
+
+        let mut enc = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("step-test-encoder"),
+            });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("step-test-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pipeline.encode_trace(&mut pass, &bind, uniforms.dynamic_offset(0), 2);
+        }
+        ctx.queue().submit([enc.finish()]);
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+
+        let img = target.read_rgba();
+        let horizontal: u32 = (0..h).map(|y| u32::from(img.pixel(20, y)[2])).sum();
+        let vertical: u32 = (0..w).map(|x| u32::from(img.pixel(x, 29)[2])).sum();
+        assert!(
+            horizontal.abs_diff(vertical) <= 16,
+            "horizontal leg ink {horizontal} vs vertical leg ink {vertical}"
+        );
+    }
 }
