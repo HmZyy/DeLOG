@@ -656,6 +656,10 @@ impl TraceCache {
             }
             let cl = col_index(nx0.max(x0), x0, inv, width);
             let cr = col_index(nx1.min(x1), x0, inv, width);
+            if cr > cl + 1 {
+                self.sweep_columns(x0, x1, s0.max(a), (s1 + 1).min(b), mins, maxs);
+                continue;
+            }
             for col in cl..=cr {
                 if node.min < mins[col] || mins[col].is_nan() {
                     mins[col] = node.min;
@@ -1502,6 +1506,33 @@ mod tests {
         for c in 0..3 {
             assert_eq!(cols[c * 3 + 2], cols[(c + 1) * 3 + 1], "column {c} bridges");
         }
+    }
+
+    #[test]
+    fn l0_minmax_columns_leave_a_gap_inside_one_node_empty() {
+        let mut pts = Vec::new();
+        for i in 0..4000 {
+            pts.push((i as f32, 110.0));
+        }
+        for i in 0..4000 {
+            pts.push((6000.0 + i as f32, 80.0));
+        }
+        let cache = cache_from_xy(&pts);
+        assert!(cache.samples() >= 100 * BRANCH);
+
+        let cols = cache.minmax_columns(0.0, 10000.0, 100, 10);
+
+        for c in 0..100 {
+            let x = cols[3 * c];
+            if x > 4100.0 && x < 5900.0 {
+                assert!(
+                    cols[3 * c + 1].is_nan(),
+                    "gap column {c} at x={x} is filled"
+                );
+            }
+        }
+        assert_eq!(cols[3 * 39 + 1], 110.0);
+        assert_eq!(cols[3 * 60 + 2], 80.0);
     }
 
     #[test]
