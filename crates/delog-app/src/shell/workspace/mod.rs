@@ -841,6 +841,7 @@ pub struct WorkspaceActions {
     pub image: Option<WorkspaceImageAction>,
     /// Manual X-view change (pan/zoom/reset); unlocks live-tail mode.
     pub view_changed: bool,
+    pub view_moved: bool,
     pub open_vehicle_config: bool,
     pub open_scene_settings: bool,
     pub export_kml: bool,
@@ -2104,6 +2105,7 @@ impl Behavior<'_> {
             if let Some(range) = self.services.snapshot.global_time_range() {
                 *self.services.view = Some(ViewX::from_range(range));
                 self.actions.view_changed = true;
+                self.actions.view_moved = true;
             }
             return;
         }
@@ -2112,6 +2114,7 @@ impl Behavior<'_> {
         if response.dragged_by(egui::PointerButton::Primary) {
             gpu::apply_pan(&mut view, response.drag_delta().x, rect.width());
             changed = true;
+            self.actions.view_moved = true;
         }
 
         if response.hovered() {
@@ -2171,6 +2174,7 @@ impl Behavior<'_> {
             {
                 *self.services.view = Some(new_view);
                 self.actions.view_changed = true;
+                self.actions.view_moved = true;
             }
         }
     }
