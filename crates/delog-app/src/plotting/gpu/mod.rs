@@ -415,6 +415,7 @@ impl GpuBridge {
                 let Some(cache) = caches.get(trace.field) else {
                     continue;
                 };
+                let gap_mode = trace_gap_mode(trace.mode, tuning.gap_mode);
                 let gap_threshold = if cache.median_dt <= 0.0 {
                     0.0
                 } else {
@@ -434,7 +435,7 @@ impl GpuBridge {
                     )
                     .with_y_axis(y_scale, y_min)
                     .with_aa(tuning.line_aa_px)
-                    .with_gap(gap_mode_u32(tuning.gap_mode), gap_threshold),
+                    .with_gap(gap_mode_u32(gap_mode), gap_threshold),
                 );
                 if bridged && trace.mode == TraceMode::Line {
                     let bridge_mode = if dotted { GAP_FORCE_DASH } else { GAP_CONNECT };
@@ -790,7 +791,7 @@ pub fn visible_y_range(
             } else {
                 tuning.gap_factor * cache.median_dt
             };
-            let gaps = match tuning.gap_mode {
+            let gaps = match trace_gap_mode(trace.mode, tuning.gap_mode) {
                 GapMode::Connect => GapBehavior::Connect,
                 GapMode::Cut => GapBehavior::Cut {
                     threshold: gap_threshold,
@@ -937,6 +938,13 @@ fn isolated_points_xy(xy: &[f32], threshold: f32) -> Vec<f32> {
         }
     }
     out
+}
+
+fn trace_gap_mode(trace: TraceMode, mode: GapMode) -> GapMode {
+    match trace {
+        TraceMode::Step => GapMode::Connect,
+        TraceMode::Line | TraceMode::Scatter => mode,
+    }
 }
 
 fn gap_mode_u32(mode: GapMode) -> u32 {
