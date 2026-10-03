@@ -490,17 +490,19 @@ impl TraceCache {
         if n < 2 {
             return MinMax::EMPTY;
         }
-        let (a, b) = self.index_range(x0, x1);
-        let start = a.saturating_sub(1);
-        let end = b.min(n - 1);
+        let (lo, hi) = self.finite_window(x0, x1);
         let mut range = MinMax::EMPTY;
-        for i in start..end {
-            let (p0x, p0y) = (self.x_at(i), self.xy[2 * i + 1]);
-            let (p1x, p1y) = (self.x_at(i + 1), self.xy[2 * (i + 1) + 1]);
-            if !(p0x.is_finite() && p0y.is_finite() && p1x.is_finite() && p1y.is_finite())
-                || p1x < x0
-                || p0x > x1
-            {
+        let mut prev: Option<usize> = None;
+        for i in lo..hi {
+            if !(self.x_at(i).is_finite() && self.xy[2 * i + 1].is_finite()) {
+                continue;
+            }
+            let Some(p) = prev.replace(i) else {
+                continue;
+            };
+            let (p0x, p0y) = (self.x_at(p), self.xy[2 * p + 1]);
+            let (p1x, p1y) = (self.x_at(i), self.xy[2 * i + 1]);
+            if p1x < x0 || p0x > x1 {
                 continue;
             }
             let is_gap = gaps.is_gap(p1x - p0x);
@@ -656,6 +658,10 @@ impl TraceCache {
             }
             let cl = col_index(nx0.max(x0), x0, inv, width);
             let cr = col_index(nx1.min(x1), x0, inv, width);
+            if cr > cl + 1 {
+                self.sweep_columns(x0, x1, s0.max(a), (s1 + 1).min(b), mins, maxs);
+                continue;
+            }
             for col in cl..=cr {
                 if node.min < mins[col] || mins[col].is_nan() {
                     mins[col] = node.min;
@@ -1086,6 +1092,27 @@ mod tests {
     }
 
     #[test]
+    fn step_holds_previous_value_across_null_rows() {
+        let cache = cache_from_xy(&[
+            (0.0, 100.0),
+            (5.0, f32::NAN),
+            (6.0, f32::NAN),
+            (10.0, 0.0),
+            (11.0, 1.0),
+        ]);
+
+        let mm = cache.visible_y_range(7.0, 11.0, TraceGeometry::Step, GapBehavior::Connect);
+
+        assert_eq!(
+            mm,
+            MinMax {
+                min: 0.0,
+                max: 100.0
+            }
+        );
+    }
+
+    #[test]
     fn step_cut_excludes_long_gap_geometry() {
         let cache = cache_from_xy(&[(0.0, 100.0), (10.0, 0.0), (11.0, 1.0)]);
 
@@ -1502,6 +1529,33 @@ mod tests {
         for c in 0..3 {
             assert_eq!(cols[c * 3 + 2], cols[(c + 1) * 3 + 1], "column {c} bridges");
         }
+    }
+
+    #[test]
+    fn l0_minmax_columns_leave_a_gap_inside_one_node_empty() {
+        let mut pts = Vec::new();
+        for i in 0..4000 {
+            pts.push((i as f32, 110.0));
+        }
+        for i in 0..4000 {
+            pts.push((6000.0 + i as f32, 80.0));
+        }
+        let cache = cache_from_xy(&pts);
+        assert!(cache.samples() >= 100 * BRANCH);
+
+        let cols = cache.minmax_columns(0.0, 10000.0, 100, 10);
+
+        for c in 0..100 {
+            let x = cols[3 * c];
+            if x > 4100.0 && x < 5900.0 {
+                assert!(
+                    cols[3 * c + 1].is_nan(),
+                    "gap column {c} at x={x} is filled"
+                );
+            }
+        }
+        assert_eq!(cols[3 * 39 + 1], 110.0);
+        assert_eq!(cols[3 * 60 + 2], 80.0);
     }
 
     #[test]
