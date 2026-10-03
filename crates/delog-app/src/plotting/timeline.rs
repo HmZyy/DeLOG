@@ -17,9 +17,10 @@ pub struct Playback {
     /// Canonical effective microseconds.
     pub t_us: i64,
     pub speed: f32,
-    /// Live-stream tail-follow: each frame pins the playhead to the range end
-    /// until a manual scrub clears it.
+    /// Follow mode. While `live`, each frame pins the playhead to the range end
+    /// until a manual scrub clears it; otherwise the view tracks the playhead.
     pub follow_live: bool,
+    pub live: bool,
 }
 
 impl Default for Playback {
@@ -29,6 +30,7 @@ impl Default for Playback {
             t_us: 0,
             speed: 1.0,
             follow_live: false,
+            live: false,
         }
     }
 }
@@ -45,7 +47,7 @@ impl Playback {
             (MIN_SPEED..=MAX_SPEED).contains(&self.speed),
             "speed must be set via set_speed"
         );
-        if self.follow_live {
+        if self.pinned_to_tail() {
             self.t_us = range.max_us;
             return;
         }
@@ -60,7 +62,9 @@ impl Playback {
     }
 
     pub fn scrub(&mut self, t_us: i64, range: TimeRange) {
-        self.follow_live = false;
+        if self.live {
+            self.follow_live = false;
+        }
         self.t_us = t_us.clamp(range.min_us, range.max_us);
     }
 
@@ -71,7 +75,7 @@ impl Playback {
     /// Keep the playhead inside a (grown or shrunk) range without touching play
     /// state; called once per frame as data streams in.
     pub fn clamp_to(&mut self, range: TimeRange) {
-        if self.follow_live {
+        if self.pinned_to_tail() {
             self.t_us = range.max_us;
         } else {
             self.t_us = self.t_us.clamp(range.min_us, range.max_us);
@@ -80,7 +84,13 @@ impl Playback {
 
     pub fn lock_to_live(&mut self, range: TimeRange) {
         self.follow_live = true;
-        self.t_us = range.max_us;
+        if self.live {
+            self.t_us = range.max_us;
+        }
+    }
+
+    pub fn pinned_to_tail(&self) -> bool {
+        self.follow_live && self.live
     }
 
     pub fn unlock_live(&mut self) {
@@ -224,39 +234,27 @@ pub fn ui(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let button_size = egui::vec2(40.0, 40.0);
-        // Status dot: grey = not streaming, yellow = streaming unlocked, red = locked.
-        let (dot_color, dot_tip) = if !any_live {
-            (theme.neutral(), "Not streaming")
-        } else if playback.follow_live {
-            (theme.error(), "Locked to live tail - click to unlock")
-        } else {
-            (
-                theme.warning(),
-                "Live (not locked) - click to lock to the tail",
-            )
+        let (dot_color, dot_tip) = match (any_live, playback.follow_live) {
+            (false, false) => (theme.neutral(), "Follow playhead"),
+            (false, true) => (theme.error(), "Following playhead"),
+            (true, false) => (theme.warning(), "Follow live tail"),
+            (true, true) => (theme.error(), "Following live tail"),
         };
-        let sense = if any_live {
-            egui::Sense::click()
-        } else {
-            egui::Sense::hover()
-        };
-        let (dot_rect, mut dot_resp) = ui.allocate_exact_size(button_size, sense);
-        let draw_color = if any_live && dot_resp.hovered() {
+        let (dot_rect, dot_resp) = ui.allocate_exact_size(button_size, egui::Sense::click());
+        let draw_color = if dot_resp.hovered() {
             dot_color.gamma_multiply(1.3)
         } else {
             dot_color
         };
         ui.painter()
             .circle_filled(dot_rect.center(), 5.0, draw_color);
-        if any_live {
-            dot_resp = dot_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-            if dot_resp.clicked() {
-                if playback.follow_live {
-                    playback.unlock_live();
-                } else {
-                    playback.lock_to_live(range);
-                    action.lock_live = true;
-                }
+        let dot_resp = dot_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if dot_resp.clicked() {
+            if playback.follow_live {
+                playback.unlock_live();
+            } else {
+                playback.lock_to_live(range);
+                action.lock_live = true;
             }
         }
         dot_resp.on_hover_text(dot_tip);
@@ -681,6 +679,7 @@ mod tests {
             t_us: 3_000_000,
             speed: 1.0,
             follow_live: false,
+            live: false,
         };
         p.jump_start(range());
         assert_eq!(p.t_us, 1_000_000);
@@ -695,6 +694,7 @@ mod tests {
             t_us: 1_000_000,
             speed: 2.0,
             follow_live: false,
+            live: false,
         };
         p.advance(0.5, range());
         assert_eq!(p.t_us, 2_000_000);
@@ -708,6 +708,7 @@ mod tests {
             t_us: 1_500_000,
             speed: 1.0,
             follow_live: false,
+            live: false,
         };
         p.advance(1.0, range());
         assert_eq!(p.t_us, 1_500_000);
@@ -720,6 +721,7 @@ mod tests {
             t_us: 4_900_000,
             speed: 16.0,
             follow_live: false,
+            live: false,
         };
         p.advance(1.0, range());
         assert_eq!(p.t_us, 5_000_000);
@@ -739,7 +741,10 @@ mod tests {
 
     #[test]
     fn follow_live_pins_to_range_end_as_it_grows() {
-        let mut p = Playback::default();
+        let mut p = Playback {
+            live: true,
+            ..Playback::default()
+        };
         p.lock_to_live(range());
         assert!(p.follow_live);
         assert_eq!(p.t_us, 5_000_000);
@@ -754,11 +759,36 @@ mod tests {
 
     #[test]
     fn manual_scrub_disengages_follow_live() {
-        let mut p = Playback::default();
+        let mut p = Playback {
+            live: true,
+            ..Playback::default()
+        };
         p.lock_to_live(range());
         p.scrub(2_000_000, range());
         assert!(!p.follow_live);
         assert_eq!(p.t_us, 2_000_000);
+    }
+
+    #[test]
+    fn follow_without_a_live_link_keeps_the_playhead_and_survives_scrubs() {
+        let mut p = Playback {
+            playing: true,
+            t_us: 2_000_000,
+            ..Playback::default()
+        };
+        p.lock_to_live(range());
+        assert!(p.follow_live);
+        assert!(!p.pinned_to_tail());
+        assert_eq!(p.t_us, 2_000_000);
+
+        p.advance(0.5, range());
+        assert_eq!(p.t_us, 2_500_000);
+        p.clamp_to(range());
+        assert_eq!(p.t_us, 2_500_000);
+
+        p.scrub(4_000_000, range());
+        assert!(p.follow_live);
+        assert_eq!(p.t_us, 4_000_000);
     }
 
     #[test]
@@ -812,6 +842,7 @@ mod tests {
             t_us: 9_000_000,
             speed: 1.0,
             follow_live: false,
+            live: false,
         };
         p.clamp_to(range());
         assert_eq!(p.t_us, 5_000_000);
