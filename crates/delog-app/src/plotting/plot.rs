@@ -47,6 +47,11 @@ impl ViewX {
         Self::new(min_us, range.max_us)
     }
 
+    pub fn ending_at(end_us: i64, span_us: i64) -> Self {
+        let span_us = span_us.max(1);
+        Self::from_min_and_span(end_us as i128 - span_us as i128, span_us)
+    }
+
     pub fn span_us(&self) -> i64 {
         (self.max_us as i128 - self.min_us as i128).clamp(1, i64::MAX as i128) as i64
     }
@@ -487,6 +492,12 @@ mod tests {
             ViewX::locked_to_tail(range, 2_000),
             ViewX::new(8_000, 10_000)
         );
+    }
+
+    #[test]
+    fn ending_at_keeps_the_span_even_before_the_range_start() {
+        assert_eq!(ViewX::ending_at(10_000, 2_000), ViewX::new(8_000, 10_000));
+        assert_eq!(ViewX::ending_at(1_000, 4_000), ViewX::new(-3_000, 1_000));
     }
 
     #[test]
