@@ -1,3 +1,5 @@
+#[cfg(feature = "scripting")]
+use delog_api::control::{AnnotationInfo, PlotInfo};
 use delog_core::identity::FieldId;
 
 use crate::plotting::browser::{self, BrowserFilterCache};
@@ -32,14 +34,16 @@ impl WindowId {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WindowBrowser {
     pub query: String,
     pub filter: BrowserFilterCache,
     pub selection: browser::Selection,
     pub collapsed: bool,
+    pub focus_filter: bool,
 }
 
+#[derive(Clone)]
 pub struct ExtendedWindow {
     pub id: WindowId,
     pub title: String,
@@ -101,6 +105,44 @@ pub fn next_window_id(windows: &[ExtendedWindow]) -> u64 {
     windows.iter().map(|window| window.id.0).max().unwrap_or(0) + 1
 }
 
+pub fn open_window(
+    windows: &mut Vec<ExtendedWindow>,
+    next_window_id: &mut u64,
+    title: Option<String>,
+    show_legend: bool,
+) -> WindowId {
+    let id = WindowId(*next_window_id);
+    *next_window_id += 1;
+    let mut window = ExtendedWindow::new(id);
+    window.workspace.set_all_plot_legends(show_legend);
+    if let Some(title) = title {
+        window.title = title;
+    }
+    windows.push(window);
+    id
+}
+
+pub fn all_plot_legends_visible(main: &Workspace, windows: &[ExtendedWindow]) -> bool {
+    main.all_plot_legends_visible()
+        && windows
+            .iter()
+            .all(|window| window.workspace.all_plot_legends_visible())
+}
+
+pub fn set_all_plot_legends(main: &mut Workspace, windows: &mut [ExtendedWindow], visible: bool) {
+    main.set_all_plot_legends(visible);
+    for window in windows {
+        window.workspace.set_all_plot_legends(visible);
+    }
+}
+
+pub fn equalize_plot_heights(main: &mut Workspace, windows: &mut [ExtendedWindow]) {
+    main.equalize_plot_heights();
+    for window in windows {
+        window.workspace.equalize_plot_heights();
+    }
+}
+
 pub fn union_fields(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<FieldId> {
     let mut seen = std::collections::HashSet::new();
     let mut union = Vec::new();
@@ -137,6 +179,24 @@ pub fn fields_only_in(
         }
     }
     released
+}
+
+#[cfg(feature = "scripting")]
+pub fn plot_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<PlotInfo> {
+    let mut infos = main.plot_infos(0);
+    for window in windows {
+        infos.extend(window.workspace.plot_infos(window.id.0));
+    }
+    infos
+}
+
+#[cfg(feature = "scripting")]
+pub fn annotation_infos(main: &Workspace, windows: &[ExtendedWindow]) -> Vec<AnnotationInfo> {
+    let mut infos = main.annotation_infos(0);
+    for window in windows {
+        infos.extend(window.workspace.annotation_infos(window.id.0));
+    }
+    infos
 }
 
 pub fn annotation_rows(

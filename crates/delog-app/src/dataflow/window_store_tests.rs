@@ -97,7 +97,8 @@ fn a_failed_save_on_close_keeps_the_document_and_confirmation_open() {
     assert_eq!(flow.pending_close, Some(id));
     assert_eq!(flow.active, id);
     assert_eq!(logs.len(), 1);
-    assert!(logs[0].1.contains("invalid graph name"));
+    assert_eq!(logs[0].0, LogLevel::Error);
+    assert_eq!(logs[0].1, "invalid graph name 'invalid/name'");
 }
 
 #[test]
@@ -227,4 +228,8 @@ fn opening_a_missing_flow_reports_the_failure() {
     assert!(flow.open);
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].0, LogLevel::Error);
+    assert_eq!(
+        logs[0].1,
+        flow.store.load("absent").unwrap_err().to_string()
+    );
 }

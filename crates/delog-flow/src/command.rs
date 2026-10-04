@@ -65,13 +65,18 @@ pub enum GraphCommand {
     Batch(Vec<GraphCommand>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ApplyError {
+    #[error("unknown node")]
     UnknownNode,
-    Connect(ConnectError),
+    #[error("{0}")]
+    Connect(#[from] ConnectError),
+    #[error("nothing to do")]
     NothingToDo,
+    #[error("invalid output field")]
     InvalidOutputField,
     #[cfg(feature = "scripting")]
+    #[error("invalid script port")]
     InvalidScriptPort,
 }
 

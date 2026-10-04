@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use delog_core::snapshot::StoreSnapshot;
 
+use crate::shell::app::command_palette::PaletteEntry;
+use crate::shell::app::viewport_actions::{
+    ViewportAction, collect_shortcut_actions, discard_picker_actions_from,
+};
 use crate::shell::app::{DelogApp, central_workspace_frame, collapsed_data_browser_width};
 use crate::shell::windows::{ExtendedWindow, MIN_WINDOW_SIZE, WindowId};
 use crate::shell::workspace::{PlotServices, Workspace};
@@ -12,13 +16,19 @@ impl DelogApp {
         ctx: &egui::Context,
         frame: &eframe::Frame,
         snapshot: &Arc<StoreSnapshot>,
-    ) {
+        palette_entries: &[PaletteEntry],
+    ) -> Vec<ViewportAction> {
+        let mut actions = Vec::new();
         if self.windows.is_empty() {
-            return;
+            return actions;
         }
         let mut windows = std::mem::take(&mut self.windows);
         let model = self.browser_model.take();
         let mut closed = Vec::new();
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "the indexed slot is restored after the viewport callback"
+        )]
         for index in 0..windows.len() {
             let id = windows[index].id;
             let mut window =
@@ -50,11 +60,17 @@ impl DelogApp {
                                     .clicked()
                                     {
                                         window.browser.collapsed = false;
+                                        window.browser.focus_filter = true;
                                     }
                                 });
                             });
                         });
                 } else {
+                    if std::mem::take(&mut window.browser.focus_filter) {
+                        ui.ctx().memory_mut(|memory| {
+                            memory.request_focus(crate::plotting::browser::filter_id(id.id_salt()))
+                        });
+                    }
                     egui::Panel::left(id.id_salt().with("browser"))
                         .resizable(true)
                         .min_size(360.0)
@@ -80,6 +96,12 @@ impl DelogApp {
                         });
                 }
                 self.render_workspace_window(ui, frame, snapshot, id, &mut window.workspace);
+                actions.extend(self.show_hosted_picker(ui.ctx(), id, palette_entries));
+                actions.extend(collect_shortcut_actions(
+                    ui.ctx(),
+                    id,
+                    self.command_palette.is_open(),
+                ));
                 if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
                     window.size = [rect.width(), rect.height()];
                 }
@@ -91,6 +113,10 @@ impl DelogApp {
         }
         self.browser_model = model;
         for id in closed {
+            discard_picker_actions_from(&mut actions, id);
+            if self.picker_host.is_some_and(|host| host.window == id) {
+                self.close_all_pickers();
+            }
             if let Some(index) = windows.iter().position(|window| window.id == id) {
                 let window = windows.remove(index);
                 for field in
@@ -102,6 +128,7 @@ impl DelogApp {
         }
         windows.extend(std::mem::take(&mut self.windows));
         self.windows = windows;
+        actions
     }
 
     pub(crate) fn render_workspace_window(
@@ -211,7 +238,9 @@ impl DelogApp {
                         self.playback.scrub(t_us, range);
                     }
                     if actions.view_changed {
-                        self.playback.unlock_live();
+                        if actions.view_moved || self.playback.live {
+                            self.playback.unlock_live();
+                        }
                         // Manual pan/zoom drops out of fit-all (like a scrub
                         // disengages live-follow).
                         self.fit_view_all = false;

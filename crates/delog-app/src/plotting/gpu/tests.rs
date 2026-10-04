@@ -279,13 +279,21 @@ fn visible_y_range_threads_tuning_and_trace_mode_to_cache_geometry() {
     assert!((max - 1.05).abs() < 1e-9, "max was {max}");
 
     pane.traces[0].mode = TraceMode::Step;
-    let tuning = RenderTuning {
-        gap_mode: GapMode::Connect,
-        ..tuning
-    };
-    let (min, max) = visible_y_range(&mut caches, &pane, 5.0, 11.0, tuning);
-    assert!((min - -4.0).abs() < 1e-9, "min was {min}");
-    assert!((max - 106.0).abs() < 1e-9, "max was {max}");
+    for gap_mode in [GapMode::Connect, GapMode::Cut, GapMode::Dotted] {
+        let tuning = RenderTuning { gap_mode, ..tuning };
+        let (min, max) = visible_y_range(&mut caches, &pane, 5.0, 11.0, tuning);
+        assert!((min - -4.0).abs() < 1e-9, "{gap_mode:?} min was {min}");
+        assert!((max - 106.0).abs() < 1e-9, "{gap_mode:?} max was {max}");
+    }
+}
+
+#[test]
+fn step_traces_always_connect_across_gaps() {
+    for gap_mode in [GapMode::Connect, GapMode::Cut, GapMode::Dotted] {
+        assert_eq!(trace_gap_mode(TraceMode::Step, gap_mode), GapMode::Connect);
+        assert_eq!(trace_gap_mode(TraceMode::Line, gap_mode), gap_mode);
+        assert_eq!(trace_gap_mode(TraceMode::Scatter, gap_mode), gap_mode);
+    }
 }
 
 #[test]
@@ -1468,4 +1476,24 @@ fn sky_draws_from_its_own_toggle_and_not_the_map_provider() {
 fn tile_fog_tracks_whichever_backdrop_the_scene_is_drawing() {
     assert_eq!(super::tile_fog_rgb(true), delog_render::HORIZON_RGB);
     assert_eq!(super::tile_fog_rgb(false), super::SCENE_CLEAR_RGB);
+}
+
+#[test]
+fn pane_viewport_matches_the_gpu_viewport_egui_sets() {
+    for ppp in [1.0_f32, 1.25, 1.5, 2.0] {
+        for left in [0.0_f32, 10.3, 10.5, 33.7] {
+            for width in [600.0_f32, 600.4, 600.6] {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(left, left * 0.5),
+                    egui::vec2(width, width * 0.25),
+                );
+                let gpu = egui::epaint::ViewportInPixels::from_points(&rect, ppp, [10_000, 10_000]);
+                assert_eq!(
+                    pane_viewport_px(rect, ppp),
+                    [gpu.width_px as f32, gpu.height_px as f32],
+                    "ppp {ppp} rect {rect:?}"
+                );
+            }
+        }
+    }
 }

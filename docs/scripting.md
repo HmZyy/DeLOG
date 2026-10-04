@@ -23,6 +23,7 @@ This is an **optional, build-time feature**. It is off by default.
 - [Declarative operations](#declarative-operations)
 - [Live transforms](#live-transforms)
 - [Runtime variables](#runtime-variables)
+- [App control API](#app-control-api)
 - [API reference](#api-reference)
 - [The `delog` object](#the-delog-object)
 - [Data model & conventions](#data-model--conventions)
@@ -530,6 +531,21 @@ script if nothing is active). Edits take effect immediately:
 
 ---
 
+## App control API
+
+Top-level named scripts and the Scripting Console can also inspect and control
+plots, traces, annotations, playback, vehicles, markers, and layouts. The
+complete reference—including ownership, atomic `with delog.batch():` blocks,
+and the contexts where UI control is unavailable—is in
+**[Python app control](app_control.md)**.
+
+Live-transform callbacks may use deferred `delog.add_marker(...)` or
+`delog.markers.add(...)`, but other app-control calls belong at script top
+level. Custom parsers, flow scripts, and dataflow Python nodes do not expose
+the control bridge.
+
+---
+
 ## API reference
 
 A single global object, **`delog`**, is injected into every script and REPL
@@ -543,6 +559,11 @@ session. You never import or construct it.
 | `delog.text(name, default, *, label=None)` | `str` | Declare a text-field variable; returns its current value. |
 | `delog.param(name)` | `float`/`int`/`bool`/`str` | Read the current value of a variable inside a live callback. |
 | `delog.add_marker(time_us, label, *, color=None, note=None)` | `None` | Add a runtime marker after the current script or callback succeeds. |
+| `delog.plots()`, `delog.focused_plot()` | plots | Inspect plots; see [Python app control](app_control.md). |
+| `delog.workspace`, `delog.windows`, `delog.playback` | control objects | Change workspace structure, windows, and playback. |
+| `delog.markers`, `delog.annotations` | collections | Inspect and mutate runtime markers and annotations. |
+| `delog.vehicles`, `delog.vehicle_profiles` | collections | Configure 3D vehicles and reusable profiles. |
+| `delog.layouts` | layout library | Save, load, import, export, inspect, apply, or clear layouts. |
 | `delog.transform(topic, *, multiplier=1.0, offset=0.0, fields=None, unit=None, units=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Scale/offset selected numeric fields and pass through the topic. |
 | `delog.split_by(topic, field, *, fields=None, output_topic=None, source=None, instance=None, mode="both")` | `None` | Split a topic into stable per-key output topics. |
 | `delog.merge(topics, *, base_topic, output_topic, source=None, mode="both")` | `None` | Previous-sample align selected fields onto a base topic. |
@@ -686,6 +707,9 @@ and discards only the markers staged by that evaluation.
 
 Script markers are runtime-only UI state. They are not written to layouts or
 sessions and do not persist after the application runtime ends.
+
+For marker handles, filtering, bulk creation, manual-marker protection, and
+atomic batches, see [Markers in the app-control guide](app_control.md#markers).
 
 ### `delog.emit(name, times_us, fields) -> None`
 
@@ -866,6 +890,7 @@ explicitly.
 | --- | --- | --- |
 | [`snapshot/vehicle_attitude_euler.py`](../scripts/snapshot/vehicle_attitude_euler.py) | snapshot-only | Converts a PX4 `vehicle_attitude[0]` quaternion to roll/pitch/yaw with structured reads and `delog.emit(...)`. |
 | [`snapshot/nav_controller_output_radians.py`](../scripts/snapshot/nav_controller_output_radians.py) | snapshot-only | Converts ArduPilot `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="snapshot"`. |
+| [`snapshot/app_control.py`](../scripts/snapshot/app_control.py) | snapshot-only | Lists layouts and plots, adds an `ATT.Pitch` trace, then creates a plot, annotation, and marker through the app control API. |
 | [`live/nav_controller_live_rad.py`](../scripts/live/nav_controller_live_rad.py) | live-only | Converts future `NAV_CONTROLLER_OUTPUT` angle fields to radians with a declarative transform in `mode="live"`. |
 | [`live/named_values_live_split.py`](../scripts/live/named_values_live_split.py) | live-only | Splits future `NAMED_VALUE_FLOAT` and `NAMED_VALUE_INT` rows into one topic per `name` with a declarative split. |
 | [`live/param_value_live_split.py`](../scripts/live/param_value_live_split.py) | live-only | Splits future `PARAM_VALUE` rows into one topic per `param_id` with a declarative split. |

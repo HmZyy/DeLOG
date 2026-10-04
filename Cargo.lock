@@ -996,13 +996,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "delog-api"
+version = "0.4.1"
+dependencies = [
+ "arrow",
+ "delog-core",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "delog-app"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arboard",
  "arrow",
  "bytemuck",
  "crossbeam-channel",
+ "delog-api",
  "delog-cache",
  "delog-core",
  "delog-flow",
@@ -1023,11 +1035,13 @@ dependencies = [
  "glam",
  "image",
  "parquet",
+ "pollster",
  "reqwest",
  "rfd",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tiny_http",
  "tracing",
  "tracing-subscriber",
@@ -1038,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "delog-cache"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1048,27 +1062,29 @@ dependencies = [
 
 [[package]]
 name = "delog-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arc-swap",
  "arrow",
  "criterion",
  "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "delog-flow"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "delog-core",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "delog-parquet-format"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "serde",
@@ -1078,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "delog-parsers"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "bytes",
@@ -1088,11 +1104,12 @@ dependencies = [
  "mavlink",
  "parquet",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "delog-render"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -1109,10 +1126,11 @@ dependencies = [
 
 [[package]]
 name = "delog-script"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "criterion",
+ "delog-api",
  "delog-core",
  "delog-flow",
  "numpy",
@@ -1126,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "delog-stream"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow",
  "criterion",
@@ -1135,6 +1153,7 @@ dependencies = [
  "delog-parsers",
  "mavlink",
  "serialport",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

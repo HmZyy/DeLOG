@@ -138,9 +138,10 @@ impl CommandId {
             NewPlotWindow => spec!(
                 "New plot window",
                 Panels,
-                None,
+                Some("Ctrl+N"),
                 "window monitor screen detach extend viewport",
                 ClassicMenu,
+                Shortcut,
                 Palette
             ),
             OpenDiagnostics => spec!(

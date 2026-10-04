@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float32Array, Int64Array};
 use arrow::datatypes::DataType;
+use delog_api::params::{self, ParamValue};
 use delog_core::ingest::{IngestSink, ingest_channel};
 use delog_core::ingestor::{Ingestor, NullObserver};
 use delog_core::metrics::MetricsRegistry;
 use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
-use delog_script::params::{self, ParamValue};
 use delog_script::{ScriptCommand, ScriptEngine, ScriptEvent};
 
 const TUNABLE_LOWPASS_SCRIPT: &str = include_str!("../../../scripts/live/tunable_lowpass.py");

@@ -1,16 +1,30 @@
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 pub mod command_palette;
 pub mod commands;
 pub mod context_header;
+#[cfg(feature = "scripting")]
+mod control_ownership;
+#[cfg(feature = "scripting")]
+mod control_service;
 mod dynamic_commands;
 pub mod global_plot_toolbar;
 pub mod inspector;
+mod param_diff;
 #[cfg(all(test, feature = "scripting"))]
 mod sequence_tests;
 mod sequences;
+mod viewport_actions;
 mod window_render;
+
+use viewport_actions::{
+    CommandInvocation, PickerFlow, PickerHost, ShortcutScope, ViewportAction,
+    collect_shortcut_actions, command_palette_host_after_toggle, picker_host_after_close,
+};
+#[cfg(test)]
+use viewport_actions::{SHORTCUT_KEYS, shortcut_for_key};
 
 use delog_cache::CacheManager;
 use delog_core::diagnostics::{DiagRecord, Severity};
@@ -36,11 +50,40 @@ use crate::ui::docks::{AppDockController, AppDockTab};
 use crate::ui::logging::{LogLevel, LogRecord, LoggingDock, PendingLog};
 use crate::ui::performance::{PerformanceDock, PerformanceSnapshot, ResourceSummary, TraceSummary};
 
+fn load_headless_graph(
+    name: &str,
+    dir: Option<PathBuf>,
+) -> Result<delog_flow::graph::Graph, String> {
+    let dir = dir.ok_or_else(|| "application data directory is unavailable".to_owned())?;
+    crate::dataflow::store::GraphStore::new(dir)
+        .load(name)
+        .map_err(|error| error.to_string())
+}
+
 fn data_browser_panel(preferred_width: f32) -> egui::Panel {
     egui::Panel::left("data_browser_expanded")
         .resizable(true)
         .min_size(360.0)
         .default_size(preferred_width)
+}
+
+fn toggle_data_browser_for_window(
+    origin: crate::shell::windows::WindowId,
+    main_collapsed: &mut bool,
+    main_focus_filter: &mut bool,
+    windows: &mut [crate::shell::windows::ExtendedWindow],
+) {
+    if origin.is_main() {
+        *main_collapsed = !*main_collapsed;
+        *main_focus_filter = !*main_collapsed;
+        return;
+    }
+
+    let Some(window) = windows.iter_mut().find(|window| window.id == origin) else {
+        return;
+    };
+    window.browser.collapsed = !window.browser.collapsed;
+    window.browser.focus_filter = !window.browser.collapsed;
 }
 
 fn collapsed_data_browser_width(style: &egui::Style) -> f32 {
@@ -309,7 +352,7 @@ struct RunScriptDialog {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunKind {
+pub(crate) enum RunKind {
     Script,
     Parser,
     Dataflow,
@@ -490,7 +533,7 @@ pub struct DelogApp {
     /// per data change, not every frame.
     browser_model: Option<(u64, BrowserModel)>,
     offset_dialog: Option<(delog_core::identity::SourceId, i64)>,
-    source_metadata_dialog: Option<delog_core::identity::SourceId>,
+    source_metadata_dialogs: Vec<delog_core::identity::SourceId>,
     field_metadata_dialog: Option<delog_core::identity::FieldId>,
     field_stats: FieldStatsController,
     text_viewers: crate::plotting::text_viewer::TextViewers,
@@ -506,6 +549,7 @@ pub struct DelogApp {
     load_layout_dialog: LoadLayoutDialog,
     run_script_dialog: RunScriptDialog,
     run_palette_dialog: RunPaletteDialog,
+    picker_host: Option<PickerHost>,
     headless_flows: std::collections::BTreeMap<String, crate::dataflow::headless::HeadlessFlow>,
     layout_manager_dialog: LayoutManagerDialog,
     settings: AppSettings,
@@ -520,6 +564,7 @@ pub struct DelogApp {
     show_connection_dialog: bool,
     connection_dialog: ConnectionDialog,
     vehicles: Vec<crate::scene3d::vehicle::VehicleConfig>,
+    next_vehicle_id: u64,
     vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog,
     /// Parallel to `vehicles`, rebuilt on a worker when the data epoch or
     /// vehicle set changes.
@@ -585,6 +630,7 @@ impl DelogApp {
                     config_dir.join("scripts"),
                     config_dir.join("parsers"),
                     config_dir.join("script_params.json"),
+                    cc.egui_ctx.clone(),
                 )
             },
             gpu: GpuBridge::from_creation_context(cc),
@@ -654,7 +700,7 @@ impl DelogApp {
             browser_selection: browser::Selection::default(),
             browser_model: None,
             offset_dialog: None,
-            source_metadata_dialog: None,
+            source_metadata_dialogs: Vec::new(),
             field_metadata_dialog: None,
             field_stats: FieldStatsController::default(),
             text_viewers: crate::plotting::text_viewer::TextViewers::default(),
@@ -673,6 +719,7 @@ impl DelogApp {
             load_layout_dialog: LoadLayoutDialog::default(),
             run_script_dialog: RunScriptDialog::default(),
             run_palette_dialog: RunPaletteDialog::default(),
+            picker_host: None,
             headless_flows: std::collections::BTreeMap::new(),
             layout_manager_dialog: LayoutManagerDialog::default(),
             settings,
@@ -687,6 +734,7 @@ impl DelogApp {
             show_connection_dialog: false,
             connection_dialog,
             vehicles: Vec::new(),
+            next_vehicle_id: 1,
             vehicle_dialog: crate::session::vehicle_dialog::VehicleDialog::default(),
             vehicle_trajectories: Vec::new(),
             traj_epoch: u64::MAX,
@@ -1240,6 +1288,7 @@ impl DelogApp {
     }
 
     fn lock_to_live(&mut self, range: TimeRange) {
+        self.fit_view_all = false;
         self.playback.lock_to_live(range);
         self.pin_view_to_live(range);
     }
@@ -1249,7 +1298,17 @@ impl DelogApp {
             .view
             .map(|view| view.span_us())
             .unwrap_or_else(|| (range.max_us - range.min_us).max(1));
-        self.view = Some(ViewX::locked_to_tail(range, span));
+        self.view = Some(if self.playback.live {
+            ViewX::locked_to_tail(range, span)
+        } else {
+            ViewX::ending_at(self.playback.t_us, span)
+        });
+    }
+
+    fn follow_playhead_view(&mut self, has_data: bool, range: TimeRange) {
+        if has_data && !self.fit_view_all && self.playback.follow_live {
+            self.pin_view_to_live(range);
+        }
     }
 
     fn clear_current_layout(&mut self) {
@@ -1272,6 +1331,30 @@ impl DelogApp {
         self.deferred_layout_doc = None;
         self.traj_building = None;
         self.vehicle_trajectories.clear();
+    }
+
+    #[cfg(feature = "scripting")]
+    fn apply_layout_control_effects(&mut self, effects: control_service::LayoutControlEffects) {
+        if effects.interrupt_layout {
+            self.sequences.interrupt_layout();
+        }
+        if effects.reset_view {
+            self.view = None;
+            self.view_fitted = false;
+            self.fit_view_all = true;
+        }
+        if effects.clear_transients {
+            self.fit_view_all = DEFAULT_FIT_VIEW_ALL;
+            self.marker_us = None;
+            self.vehicle_dialog = crate::session::vehicle_dialog::VehicleDialog::default();
+            self.pending_layout = None;
+            self.deferred_layout_doc = None;
+            self.traj_building = None;
+            self.vehicle_trajectories.clear();
+        }
+        if effects.invalidate_catalog {
+            self.dynamic_command_catalog.invalidate();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1836,9 +1919,40 @@ impl DelogApp {
         let _ = name;
     }
 
-    fn open_command_palette(&mut self) {
-        self.dynamic_command_catalog.invalidate();
-        self.command_palette.open();
+    fn activate_picker(&mut self, flow: PickerFlow, origin: crate::shell::windows::WindowId) {
+        if !origin.is_main() && !self.windows.iter().any(|window| window.id == origin) {
+            return;
+        }
+        self.close_all_pickers();
+        match flow {
+            PickerFlow::CommandPalette => {
+                self.dynamic_command_catalog.invalidate();
+                self.command_palette.open();
+            }
+            PickerFlow::LoadLayout => {
+                self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
+                self.load_layout_dialog.picker.open();
+            }
+            PickerFlow::RunScript => {
+                #[cfg(feature = "scripting")]
+                {
+                    self.run_script_dialog.scripts =
+                        self.scripts.try_script_names().unwrap_or_default();
+                }
+                self.run_script_dialog.picker.open();
+            }
+            PickerFlow::RunPalette => self.run_palette_dialog.open(),
+        }
+        self.picker_host = Some(PickerHost::new(origin, flow));
+    }
+
+    fn close_all_pickers(&mut self) {
+        self.command_palette.close();
+        self.load_layout_dialog.picker.close();
+        self.run_script_dialog.picker.close();
+        self.run_palette_dialog.kinds.close();
+        self.run_palette_dialog.items.close();
+        self.picker_host = None;
     }
 
     fn command_presentations(
@@ -1947,7 +2061,10 @@ impl DelogApp {
                 readout_lock: self.lock_readouts,
                 measuring_marker: self.marker_us.is_some(),
                 field_stats_open: self.field_stats.is_open(),
-                legends_visible: self.workspace.all_plot_legends_visible(),
+                legends_visible: crate::shell::windows::all_plot_legends_visible(
+                    &self.workspace,
+                    &self.windows,
+                ),
                 annotation_toolbar_open: self.annotation_toolbar_open,
             },
             dynamic,
@@ -2047,13 +2164,14 @@ impl DelogApp {
 
     fn dispatch_command(
         &mut self,
-        command: commands::AppCommand,
+        invocation: CommandInvocation,
         ctx: &egui::Context,
         frame: &eframe::Frame,
         snapshot: &delog_core::snapshot::StoreSnapshot,
         range: TimeRange,
     ) {
         use commands::{AppCommand, CommandId};
+        let CommandInvocation { origin, command } = invocation;
         match command {
             AppCommand::ShowAbout => self.show_about = true,
             AppCommand::ToggleShellEmphasis => {
@@ -2114,8 +2232,12 @@ impl DelogApp {
                     ),
                 ),
                 CommandId::ToggleDataBrowser => {
-                    self.browser_collapsed = !self.browser_collapsed;
-                    self.browser_focus_filter = !self.browser_collapsed;
+                    toggle_data_browser_for_window(
+                        origin,
+                        &mut self.browser_collapsed,
+                        &mut self.browser_focus_filter,
+                        &mut self.windows,
+                    );
                 }
                 CommandId::ToggleInspector => self.inspector.open = !self.inspector.open,
                 CommandId::ToggleScene3d => self.workspace.toggle_scene_pane(),
@@ -2129,24 +2251,17 @@ impl DelogApp {
                 }
                 CommandId::OpenLogging => self.toggle_dock(AppDockTab::Logging),
                 CommandId::SaveLayout => self.save_layout_dialog.open = true,
-                CommandId::LoadLayout => {
-                    self.load_layout_dialog.layouts = crate::config::layout::doc::list_layouts();
-                    self.load_layout_dialog.picker.open();
-                }
-                CommandId::RunScript => {
-                    #[cfg(feature = "scripting")]
-                    {
-                        self.run_script_dialog.scripts =
-                            self.scripts.try_script_names().unwrap_or_default();
-                    }
-                    self.run_script_dialog.picker.open();
-                }
-                CommandId::RunPalette => self.open_run_palette(),
+                CommandId::LoadLayout => self.activate_picker(PickerFlow::LoadLayout, origin),
+                CommandId::RunScript => self.activate_picker(PickerFlow::RunScript, origin),
+                CommandId::RunPalette => self.activate_picker(PickerFlow::RunPalette, origin),
                 CommandId::ManageLayouts => self.open_layout_manager(),
                 CommandId::ClearLayout => self.clear_current_layout(),
                 CommandId::ImportLayout => self.spawn_import_layout_dialog(ctx),
                 CommandId::ExportLayout => self.spawn_export_layout_dialog(ctx, snapshot),
-                CommandId::EqualizePlots => self.workspace.equalize_plot_heights(),
+                CommandId::EqualizePlots => crate::shell::windows::equalize_plot_heights(
+                    &mut self.workspace,
+                    &mut self.windows,
+                ),
                 CommandId::OpenDataFlow => self.dataflow.open = true,
                 CommandId::ManageSequences => {
                     self.sequences.manager.open = true;
@@ -2178,8 +2293,15 @@ impl DelogApp {
                         next_legend_position(self.settings.plot.legend_position)
                 }
                 CommandId::ToggleLegends => {
-                    let visible = !self.workspace.all_plot_legends_visible();
-                    self.workspace.set_all_plot_legends(visible);
+                    let visible = !crate::shell::windows::all_plot_legends_visible(
+                        &self.workspace,
+                        &self.windows,
+                    );
+                    crate::shell::windows::set_all_plot_legends(
+                        &mut self.workspace,
+                        &mut self.windows,
+                        visible,
+                    );
                 }
                 CommandId::ToggleFieldStats => {
                     if self.field_stats.is_open() {
@@ -2218,6 +2340,55 @@ impl DelogApp {
                     self.markers.add_at(self.playback.t_us);
                 }
             },
+        }
+    }
+
+    fn apply_viewport_action(
+        &mut self,
+        action: ViewportAction,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        snapshot: &delog_core::snapshot::StoreSnapshot,
+        range: TimeRange,
+    ) {
+        match action {
+            ViewportAction::Shortcut(invocation) => {
+                if let commands::AppCommand::Static(command) = &invocation.command
+                    && let Some(dock) = dock_for_command(*command)
+                {
+                    self.open_dock(dock);
+                    return;
+                }
+                self.dispatch_command(invocation, ctx, frame, snapshot, range);
+            }
+            ViewportAction::ToggleCommandPalette { origin } => {
+                match command_palette_host_after_toggle(self.picker_host, origin) {
+                    Some(_) => self.activate_picker(PickerFlow::CommandPalette, origin),
+                    None => self.close_all_pickers(),
+                }
+            }
+            ViewportAction::Invoke { host, invocation } => {
+                if self.picker_host == Some(host) {
+                    self.close_all_pickers();
+                    self.dispatch_command(invocation, ctx, frame, snapshot, range);
+                }
+            }
+            ViewportAction::ChooseRunKind { host, kind } => {
+                if self.picker_host == Some(host) {
+                    self.open_run_palette_items(kind);
+                }
+            }
+            ViewportAction::RunItem { host, kind, name } => {
+                if self.picker_host == Some(host) {
+                    self.close_all_pickers();
+                    self.run_palette_pick(ctx, kind, &name);
+                }
+            }
+            ViewportAction::PickerClosed { host } => {
+                if picker_host_after_close(self.picker_host, host).is_none() {
+                    self.close_all_pickers();
+                }
+            }
         }
     }
 
@@ -2327,6 +2498,16 @@ impl DelogApp {
         self.playback.follow_live = layout.follow_live;
         // Legend/tooltip visibility is restored per-pane via the workspace.
         self.vehicles = layout.vehicles;
+        if let Err(error) = crate::scene3d::vehicle::assign_runtime_ids(
+            &mut self.vehicles,
+            &mut self.next_vehicle_id,
+        ) {
+            self.session
+                .push_diagnostic(delog_core::diagnostics::Diag::error(
+                    "layout-vehicles",
+                    error,
+                ));
+        }
         self.vehicle_revision = self.vehicle_revision.wrapping_add(1);
         self.traj_dirty = true;
         for diag in layout.diagnostics {
@@ -2335,9 +2516,7 @@ impl DelogApp {
     }
 
     fn start_headless_dataflow(&mut self, name: &str) {
-        let graph = crate::dataflow::store::GraphStore::default_dir()
-            .ok_or_else(|| "application data directory is unavailable".to_owned())
-            .and_then(|dir| crate::dataflow::store::GraphStore::new(dir).load(name));
+        let graph = load_headless_graph(name, crate::dataflow::store::GraphStore::default_dir());
         let graph = match graph {
             Ok(graph) => graph,
             Err(error) => {
@@ -2427,10 +2606,6 @@ impl DelogApp {
         }
     }
 
-    fn open_run_palette(&mut self) {
-        self.run_palette_dialog.open();
-    }
-
     fn run_palette_names(&mut self, kind: RunKind) -> Vec<String> {
         match kind {
             RunKind::Script => {
@@ -2480,7 +2655,124 @@ impl DelogApp {
         }
     }
 
-    fn show_layout_windows(&mut self, ctx: &egui::Context) {
+    fn show_hosted_picker(
+        &mut self,
+        ctx: &egui::Context,
+        window: crate::shell::windows::WindowId,
+        palette_entries: &[command_palette::PaletteEntry],
+    ) -> Option<ViewportAction> {
+        use commands::{AppCommand, CommandId};
+        let host = self.picker_host.filter(|host| host.window == window)?;
+        let invoke = |command| ViewportAction::Invoke {
+            host,
+            invocation: CommandInvocation::new(window, command),
+        };
+        let picked = match host.flow {
+            PickerFlow::CommandPalette => {
+                self.command_palette.show(ctx, palette_entries).map(invoke)
+            }
+            PickerFlow::LoadLayout => {
+                let mut items = vec![crate::ui::palette::PickerItem::new(
+                    LayoutPick::Clear,
+                    CommandId::ClearLayout.spec().label,
+                )];
+                items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
+                    |(index, name)| {
+                        let mut item = crate::ui::palette::PickerItem::new(
+                            LayoutPick::Load(name.clone()),
+                            name.clone(),
+                        );
+                        item.separator_before = index == 0;
+                        item
+                    },
+                ));
+                self.load_layout_dialog
+                    .picker
+                    .show(
+                        ctx,
+                        "load-layout-picker",
+                        "Search layouts…",
+                        &crate::ui::empty::no_saved("layouts"),
+                        &crate::ui::empty::no_matching("layouts"),
+                        &items,
+                    )
+                    .map(|pick| match pick {
+                        LayoutPick::Clear => invoke(AppCommand::Static(CommandId::ClearLayout)),
+                        LayoutPick::Load(name) => invoke(AppCommand::LoadNamedLayout(name)),
+                    })
+            }
+            PickerFlow::RunScript => {
+                let items: Vec<_> = self
+                    .run_script_dialog
+                    .scripts
+                    .iter()
+                    .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
+                    .collect();
+                self.run_script_dialog
+                    .picker
+                    .show(
+                        ctx,
+                        "run-script-picker",
+                        "Search scripts…",
+                        &crate::ui::empty::no_saved("scripts"),
+                        &crate::ui::empty::no_matching("scripts"),
+                        &items,
+                    )
+                    .map(|name| invoke(AppCommand::RunScript(name)))
+            }
+            PickerFlow::RunPalette => self.show_run_palette(ctx, host),
+        };
+        if picked.is_some() {
+            return picked;
+        }
+        let still_open = match host.flow {
+            PickerFlow::CommandPalette => self.command_palette.is_open(),
+            PickerFlow::LoadLayout => self.load_layout_dialog.picker.open,
+            PickerFlow::RunScript => self.run_script_dialog.picker.open,
+            PickerFlow::RunPalette => {
+                self.run_palette_dialog.kinds.open || self.run_palette_dialog.items.open
+            }
+        };
+        (!still_open).then_some(ViewportAction::PickerClosed { host })
+    }
+
+    fn show_run_palette(
+        &mut self,
+        ctx: &egui::Context,
+        host: PickerHost,
+    ) -> Option<ViewportAction> {
+        if self.run_palette_dialog.items.open
+            && let Some(kind) = self.run_palette_dialog.kind
+        {
+            let items = self.run_palette_dialog.name_items();
+            return self
+                .run_palette_dialog
+                .items
+                .show(
+                    ctx,
+                    "run-palette-items",
+                    kind.search_hint(),
+                    &kind.empty_hint(),
+                    &kind.no_match_hint(),
+                    &items,
+                )
+                .map(|name| ViewportAction::RunItem { host, kind, name });
+        }
+        let items = RunPaletteDialog::kind_items();
+        self.run_palette_dialog
+            .kinds
+            .show(
+                ctx,
+                "run-palette-kinds",
+                "Search what to run…",
+                "Nothing to run",
+                &crate::ui::empty::no_matching("actions"),
+                &items,
+            )
+            .map(|kind| ViewportAction::ChooseRunKind { host, kind })
+    }
+
+    fn show_main_dialogs(&mut self, ctx: &egui::Context) {
         if self.save_layout_dialog.open {
             let mut open = self.save_layout_dialog.open;
             egui::Window::new("Save Layout")
@@ -2506,87 +2798,6 @@ impl DelogApp {
                     });
                 });
             self.save_layout_dialog.open &= open;
-        }
-
-        if self.load_layout_dialog.picker.open {
-            let mut items = vec![crate::ui::palette::PickerItem::new(
-                LayoutPick::Clear,
-                commands::CommandId::ClearLayout.spec().label,
-            )];
-            items.extend(self.load_layout_dialog.layouts.iter().enumerate().map(
-                |(index, name)| {
-                    let mut item = crate::ui::palette::PickerItem::new(
-                        LayoutPick::Load(name.clone()),
-                        name.clone(),
-                    );
-                    item.separator_before = index == 0;
-                    item
-                },
-            ));
-            match self.load_layout_dialog.picker.show(
-                ctx,
-                "load-layout-picker",
-                "Search layouts…",
-                &crate::ui::empty::no_saved("layouts"),
-                &crate::ui::empty::no_matching("layouts"),
-                &items,
-            ) {
-                Some(LayoutPick::Clear) => self.clear_current_layout(),
-                Some(LayoutPick::Load(name)) => {
-                    let snapshot = self.session.snapshot();
-                    self.load_layout(&name, &snapshot);
-                }
-                None => {}
-            }
-        }
-
-        if self.run_palette_dialog.kinds.open {
-            let items = RunPaletteDialog::kind_items();
-            if let Some(kind) = self.run_palette_dialog.kinds.show(
-                ctx,
-                "run-palette-kinds",
-                "Search what to run…",
-                "Nothing to run",
-                &crate::ui::empty::no_matching("actions"),
-                &items,
-            ) {
-                self.open_run_palette_items(kind);
-            }
-        }
-
-        if self.run_palette_dialog.items.open
-            && let Some(kind) = self.run_palette_dialog.kind
-        {
-            let items = self.run_palette_dialog.name_items();
-            if let Some(name) = self.run_palette_dialog.items.show(
-                ctx,
-                "run-palette-items",
-                kind.search_hint(),
-                &kind.empty_hint(),
-                &kind.no_match_hint(),
-                &items,
-            ) {
-                self.run_palette_pick(ctx, kind, &name);
-            }
-        }
-
-        if self.run_script_dialog.picker.open {
-            let items: Vec<_> = self
-                .run_script_dialog
-                .scripts
-                .iter()
-                .map(|name| crate::ui::palette::PickerItem::new(name.clone(), name.clone()))
-                .collect();
-            if let Some(name) = self.run_script_dialog.picker.show(
-                ctx,
-                "run-script-picker",
-                "Search scripts…",
-                &crate::ui::empty::no_saved("scripts"),
-                &crate::ui::empty::no_matching("scripts"),
-                &items,
-            ) {
-                self.run_named_script(&name);
-            }
         }
 
         if self.layout_manager_dialog.open {
@@ -2754,10 +2965,12 @@ impl DelogApp {
     }
 
     fn open_extended_window(&mut self) {
-        let id = crate::shell::windows::WindowId(self.next_window_id);
-        self.next_window_id += 1;
-        self.windows
-            .push(crate::shell::windows::ExtendedWindow::new(id));
+        crate::shell::windows::open_window(
+            &mut self.windows,
+            &mut self.next_window_id,
+            None,
+            self.workspace.default_show_legend,
+        );
     }
 
     fn apply_browser_response(
@@ -2771,8 +2984,10 @@ impl DelogApp {
         if let Some(source) = response.remove_source {
             self.session.remove_source(source);
         }
-        if let Some(source) = response.inspect_source {
-            self.source_metadata_dialog = Some(source);
+        if let Some(source) = response.inspect_source
+            && !self.source_metadata_dialogs.contains(&source)
+        {
+            self.source_metadata_dialogs.push(source);
         }
         if let Some(field) = response.inspect_field_metadata {
             self.field_metadata_dialog = Some(field);
@@ -2889,12 +3104,11 @@ impl eframe::App for DelogApp {
 
             // Advance the playhead - the single time authority.
             let dt = ui.ctx().input(|i| i.stable_dt) as f64;
+            self.playback.live = self.session.has_live_links();
             self.playback.clamp_to(range);
             self.playback.advance(dt, range);
             if self.fit_view_all {
                 self.view = Some(ViewX::from_range(range));
-            } else if self.session.has_live_links() && self.playback.follow_live {
-                self.pin_view_to_live(range);
             }
 
             // Idle-aware repaint: keep frames continuous only while playing or
@@ -3039,7 +3253,10 @@ impl eframe::App for DelogApp {
             measuring_marker: self.marker_us.is_some(),
             field_stats_open: self.field_stats.is_open(),
             legend_position: self.settings.plot.legend_position,
-            legends_visible: self.workspace.all_plot_legends_visible(),
+            legends_visible: crate::shell::windows::all_plot_legends_visible(
+                &self.workspace,
+                &self.windows,
+            ),
             annotation_toolbar_open: self.annotation_toolbar_open,
         };
         let header_output = egui::Panel::top("context_header")
@@ -3051,49 +3268,25 @@ impl eframe::App for DelogApp {
             .inner;
         drop(ui_menu_timer);
         for command in header_output.commands {
-            self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
+            self.dispatch_command(
+                CommandInvocation::main(command),
+                ui.ctx(),
+                frame,
+                &snapshot,
+                range,
+            );
         }
         if header_output.refresh_dynamic_catalog {
             self.dynamic_command_catalog.invalidate();
         }
 
-        let wants_keyboard = ui.ctx().egui_wants_keyboard_input();
-        let palette_shortcut = ui.ctx().input(|input| {
-            input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::P)
-        });
-        if command_palette::should_toggle_palette(palette_shortcut, wants_keyboard) {
-            if self.command_palette.is_open() {
-                self.command_palette.close();
-            } else {
-                self.open_command_palette();
-            }
-        }
-
-        if !self.command_palette.is_open() {
-            use commands::AppCommand;
-            let shortcuts = ui.ctx().input(|input| {
-                SHORTCUT_KEYS
-                    .iter()
-                    .copied()
-                    .filter(|key| input.key_pressed(*key))
-                    .filter_map(|key| shortcut_for_key(key, input.modifiers.command))
-                    .filter(|(_, scope)| scope.allows(wants_keyboard))
-                    .map(|(command, _)| command)
-                    .collect::<Vec<_>>()
-            });
-            for command in shortcuts {
-                if let Some(dock) = dock_for_command(command) {
-                    self.open_dock(dock);
-                } else {
-                    self.dispatch_command(
-                        AppCommand::Static(command),
-                        ui.ctx(),
-                        frame,
-                        &snapshot,
-                        range,
-                    );
-                }
-            }
+        let shortcut_actions = collect_shortcut_actions(
+            ui.ctx(),
+            crate::shell::windows::WindowId::MAIN,
+            self.command_palette.is_open(),
+        );
+        for action in shortcut_actions {
+            self.apply_viewport_action(action, ui.ctx(), frame, &snapshot, range);
         }
 
         let ui_diagnostics_timer = self.session.metrics().scope("ui_diagnostics");
@@ -3317,7 +3510,7 @@ impl eframe::App for DelogApp {
         }
         drop(ui_browser_timer);
         if let Some(t_us) =
-            show_source_metadata_window(ui.ctx(), &snapshot, &mut self.source_metadata_dialog)
+            show_source_metadata_windows(ui.ctx(), &snapshot, &mut self.source_metadata_dialogs)
             && let Some(range) = snapshot.global_time_range()
         {
             self.playback.scrub(t_us, range);
@@ -3411,8 +3604,21 @@ impl eframe::App for DelogApp {
 
         let windows_ctx = ui.ctx().clone();
         self.alt_held = crate::shell::windows::alt_held(&windows_ctx, &self.windows);
-        self.render_extended_windows(&windows_ctx, frame, &snapshot);
+        let extended_palette_entries = if self.command_palette.is_open()
+            && self.picker_host.is_some_and(|host| !host.window.is_main())
+        {
+            Self::command_palette_entries(command_presentations.clone())
+        } else {
+            Vec::new()
+        };
+        self.follow_playhead_view(global_range.is_some(), range);
+        let extended_actions =
+            self.render_extended_windows(&windows_ctx, frame, &snapshot, &extended_palette_entries);
+        for action in extended_actions {
+            self.apply_viewport_action(action, &windows_ctx, frame, &snapshot, range);
+        }
 
+        self.follow_playhead_view(global_range.is_some(), range);
         let ui_workspace_timer = self.session.metrics().scope("ui_workspace");
         let mut main_workspace = std::mem::replace(
             &mut self.workspace,
@@ -3489,7 +3695,7 @@ impl eframe::App for DelogApp {
         // inside `frame_total`, after every other section).
         let _ui_windows_timer = self.session.metrics().scope("ui_windows");
         crate::export::data_export::progress_ui(ui.ctx(), &self.data_exports);
-        self.show_layout_windows(ui.ctx());
+        self.show_main_dialogs(ui.ctx());
         self.drive_sequences(ui.ctx());
         self.poll_update_checks();
         self.show_update_prompt(ui.ctx());
@@ -3612,8 +3818,64 @@ impl eframe::App for DelogApp {
                 self.settings.scripting.auto_open_console,
                 self.settings.scripting.use_original_timestamps,
             );
-            for command in self.scripts.take_marker_commands() {
-                self.markers.apply_script_command(command);
+            let vehicle_profiles =
+                crate::session::vehicle_profiles::VehicleProfileLibrary::from_config_dir();
+            let mut layout_effects = control_service::LayoutControlEffects::default();
+            if let Some(queue) = self.scripts.control_queue() {
+                let mut control = control_service::AppControl {
+                    markers: &mut self.markers,
+                    workspace: &mut self.workspace,
+                    windows: &mut self.windows,
+                    playback: &mut self.playback,
+                    next_window_id: &mut self.next_window_id,
+                    caches: &mut self.caches,
+                    snapshot: &snapshot,
+                    vehicles: &mut self.vehicles,
+                    next_vehicle_id: &mut self.next_vehicle_id,
+                    vehicle_revision: &mut self.vehicle_revision,
+                    traj_dirty: &mut self.traj_dirty,
+                    vehicle_profiles: vehicle_profiles.as_ref(),
+                };
+                queue.drain_with(|request| {
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = control_service::apply(&mut control, request);
+                    if result.is_ok() {
+                        layout_effects.merge(effects);
+                    }
+                    result
+                });
+            }
+            self.apply_layout_control_effects(layout_effects);
+            for batch in self.scripts.take_control_batches() {
+                for request in batch {
+                    let effects = control_service::LayoutControlEffects::for_success(&request);
+                    let result = {
+                        let mut control = control_service::AppControl {
+                            markers: &mut self.markers,
+                            workspace: &mut self.workspace,
+                            windows: &mut self.windows,
+                            playback: &mut self.playback,
+                            next_window_id: &mut self.next_window_id,
+                            caches: &mut self.caches,
+                            snapshot: &snapshot,
+                            vehicles: &mut self.vehicles,
+                            next_vehicle_id: &mut self.next_vehicle_id,
+                            vehicle_revision: &mut self.vehicle_revision,
+                            traj_dirty: &mut self.traj_dirty,
+                            vehicle_profiles: vehicle_profiles.as_ref(),
+                        };
+                        control_service::apply(&mut control, request)
+                    };
+                    if let Err(error) = result {
+                        self.push_log(PendingLog::with_target(
+                            LogLevel::Error,
+                            "python-control",
+                            error,
+                        ));
+                    } else {
+                        self.apply_layout_control_effects(effects);
+                    }
+                }
             }
             for message in self.scripts.take_parser_diagnostics() {
                 self.push_log(PendingLog::with_target(
@@ -3627,11 +3889,19 @@ impl eframe::App for DelogApp {
             }
         }
 
-        if self.command_palette.is_open() {
-            let palette_entries = Self::command_palette_entries(command_presentations);
-            if let Some(command) = self.command_palette.show(ui.ctx(), &palette_entries) {
-                self.dispatch_command(command, ui.ctx(), frame, &snapshot, range);
-            }
+        let palette_entries = if self.command_palette.is_open()
+            && self.picker_host.is_some_and(|host| host.window.is_main())
+        {
+            Self::command_palette_entries(command_presentations)
+        } else {
+            Vec::new()
+        };
+        if let Some(action) = self.show_hosted_picker(
+            ui.ctx(),
+            crate::shell::windows::WindowId::MAIN,
+            &palette_entries,
+        ) {
+            self.apply_viewport_action(action, ui.ctx(), frame, &snapshot, range);
         }
     }
 }
@@ -3864,18 +4134,30 @@ fn show_field_metadata_window(
     }
 }
 
+fn show_source_metadata_windows(
+    ctx: &egui::Context,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    open_sources: &mut Vec<delog_core::identity::SourceId>,
+) -> Option<i64> {
+    let mut jump_to_time_us = None;
+    open_sources.retain(|&source_id| {
+        let (open, jump) = show_source_metadata_window(ctx, snapshot, source_id);
+        jump_to_time_us = jump_to_time_us.or(jump);
+        open
+    });
+    jump_to_time_us
+}
+
 fn show_source_metadata_window(
     ctx: &egui::Context,
     snapshot: &delog_core::snapshot::StoreSnapshot,
-    selected: &mut Option<delog_core::identity::SourceId>,
-) -> Option<i64> {
-    let source_id = (*selected)?;
+    source_id: delog_core::identity::SourceId,
+) -> (bool, Option<i64>) {
     let Some(source) = snapshot
         .source(source_id)
         .filter(|source| !source.entry.removed)
     else {
-        *selected = None;
-        return None;
+        return (false, None);
     };
 
     let mut jump_to_time_us = None;
@@ -3913,10 +4195,7 @@ fn show_source_metadata_window(
             ui.data_mut(|d| d.insert_temp(tab_id, active_source_metadata_tab(&mut dock_state)));
         });
 
-    if !open {
-        *selected = None;
-    }
-    jump_to_time_us
+    (open, jump_to_time_us)
 }
 
 fn source_metadata_dock_state(active_tab: SourceMetaTab) -> egui_dock::DockState<SourceMetaTab> {
@@ -3997,29 +4276,7 @@ fn show_source_metadata_tab(
             if source.entry.meta.params.is_empty() {
                 ui.weak("No parameters captured.");
             } else {
-                let query_id = egui::Id::new(("source_param_query", source_id.0));
-                let mut query = ui
-                    .data(|d| d.get_temp::<String>(query_id))
-                    .unwrap_or_default();
-                ui.add(
-                    egui::TextEdit::singleline(&mut query)
-                        .hint_text("Filter parameters...")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
-
-                let matches: Vec<_> = source
-                    .entry
-                    .meta
-                    .params
-                    .iter()
-                    .filter(|param| crate::plotting::browser::matches_query(&query, &param.name))
-                    .collect();
-                if matches.is_empty() {
-                    ui.weak("No parameters match the filter.");
-                } else {
-                    source_metadata_params_table(ui, source_id, &matches);
-                }
+                show_source_params(ui, snapshot, source);
             }
         }
         SourceMetaTab::LoggedMessages => {
@@ -4036,6 +4293,184 @@ fn show_source_metadata_tab(
         }
     }
     None
+}
+
+fn show_source_params(
+    ui: &mut egui::Ui,
+    snapshot: &delog_core::snapshot::StoreSnapshot,
+    source: &delog_core::snapshot::SourceSnapshot,
+) {
+    let source_id = source.entry.id;
+    let compare_id = egui::Id::new(("source_param_compare", source_id.0));
+    let diff_only_id = egui::Id::new(("source_param_diff_only", source_id.0));
+    let query_id = egui::Id::new(("source_param_query", source_id.0));
+
+    let candidates: Vec<_> = snapshot
+        .sources
+        .iter()
+        .filter(|candidate| {
+            candidate.entry.id != source_id
+                && !candidate.entry.removed
+                && !candidate.entry.meta.params.is_empty()
+        })
+        .collect();
+    let mut compare = ui
+        .data(|d| d.get_temp::<Option<delog_core::identity::SourceId>>(compare_id))
+        .flatten()
+        .filter(|id| candidates.iter().any(|candidate| candidate.entry.id == *id));
+    let mut diff_only = ui
+        .data(|d| d.get_temp::<bool>(diff_only_id))
+        .unwrap_or(true);
+
+    let other = compare.and_then(|id| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.entry.id == id)
+            .copied()
+    });
+    let rows = other
+        .map(|other| param_diff::diff_params(&source.entry.meta.params, &other.entry.meta.params));
+
+    let mut query = ui
+        .data(|d| d.get_temp::<String>(query_id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let compare_height = if candidates.is_empty() {
+                ui.spacing().interact_size.y
+            } else {
+                egui::ComboBox::from_id_salt(("source_param_compare_combo", source_id.0))
+                    .selected_text(
+                        other.map_or("Compare with...", |other| other.entry.label.as_str()),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut compare, None, "None");
+                        for candidate in &candidates {
+                            ui.selectable_value(
+                                &mut compare,
+                                Some(candidate.entry.id),
+                                candidate.entry.label.as_str(),
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .height()
+            };
+            if rows.is_some() {
+                ui.checkbox(&mut diff_only, "Differences only");
+            }
+            ui.add_sized(
+                [ui.available_width(), compare_height],
+                egui::TextEdit::singleline(&mut query)
+                    .id(egui::Id::new(("source_param_filter", source_id.0)))
+                    .hint_text("Filter parameters...")
+                    .vertical_align(egui::Align::Center),
+            );
+        });
+    });
+    ui.data_mut(|d| {
+        d.insert_temp(compare_id, compare);
+        d.insert_temp(diff_only_id, diff_only);
+        d.insert_temp(query_id, query.clone());
+    });
+    if let Some(rows) = &rows {
+        let counts = param_diff::diff_counts(rows);
+        ui.weak(format!(
+            "{} differ, {} only here, {} only in other",
+            counts.changed, counts.only_here, counts.only_other
+        ));
+    }
+
+    match (rows, other) {
+        (Some(rows), Some(other)) => {
+            let matches: Vec<_> = rows
+                .into_iter()
+                .filter(|row| !diff_only || row.kind != param_diff::ParamDiffKind::Same)
+                .filter(|row| crate::plotting::browser::matches_query(&query, row.name))
+                .collect();
+            if matches.is_empty() {
+                ui.weak("No parameters match.");
+            } else {
+                source_metadata_params_diff_table(
+                    ui,
+                    source_id,
+                    [source.entry.label.as_str(), other.entry.label.as_str()],
+                    &matches,
+                );
+            }
+        }
+        _ => {
+            let matches: Vec<_> = source
+                .entry
+                .meta
+                .params
+                .iter()
+                .filter(|param| crate::plotting::browser::matches_query(&query, &param.name))
+                .collect();
+            if matches.is_empty() {
+                ui.weak("No parameters match the filter.");
+            } else {
+                source_metadata_params_table(ui, source_id, &matches);
+            }
+        }
+    }
+}
+
+fn source_metadata_params_diff_table(
+    ui: &mut egui::Ui,
+    source_id: delog_core::identity::SourceId,
+    labels: [&str; 2],
+    rows: &[param_diff::ParamDiffRow<'_>],
+) {
+    let row_height = table_row_height(ui);
+    let highlight = ui.visuals().warn_fg_color;
+    egui::ScrollArea::vertical()
+        .id_salt(("source_params_diff", source_id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            TableBuilder::new(ui)
+                .id_salt("source_metadata_params_diff_table")
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, false])
+                .column(Column::auto().at_least(120.0))
+                .column(Column::auto().at_least(96.0))
+                .column(Column::remainder().clip(true))
+                .header(row_height, |mut header| {
+                    header.col(|ui| {
+                        ui.strong("Name");
+                    });
+                    for label in labels {
+                        header.col(|ui| {
+                            ui.strong(label);
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_height, rows.len(), |mut row| {
+                        let diff = rows[row.index()];
+                        let differs = diff.kind != param_diff::ParamDiffKind::Same;
+                        row.col(|ui| {
+                            ui.monospace(diff.name);
+                        });
+                        for value in [diff.here, diff.other] {
+                            row.col(|ui| match value {
+                                Some(value) if differs => {
+                                    ui.label(egui::RichText::new(value).color(highlight));
+                                }
+                                Some(value) => {
+                                    ui.label(value);
+                                }
+                                None => {
+                                    ui.weak("-");
+                                }
+                            });
+                        }
+                    });
+                });
+        });
 }
 
 fn source_metadata_summary_table(ui: &mut egui::Ui, rows: &[(&str, String)]) {
@@ -4598,27 +5033,6 @@ fn parser_label(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-const SHORTCUT_KEYS: &[egui::Key] = &[
-    egui::Key::F1,
-    egui::Key::F2,
-    egui::Key::F3,
-    egui::Key::F9,
-    egui::Key::F12,
-    egui::Key::Space,
-    egui::Key::Home,
-    egui::Key::End,
-    egui::Key::ArrowLeft,
-    egui::Key::ArrowRight,
-    egui::Key::S,
-    egui::Key::L,
-    egui::Key::R,
-    egui::Key::M,
-    egui::Key::E,
-    egui::Key::T,
-    egui::Key::O,
-    egui::Key::Equals,
-];
-
 fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
     use commands::CommandId;
     match command {
@@ -4630,47 +5044,6 @@ fn dock_for_command(command: commands::CommandId) -> Option<AppDockTab> {
         #[cfg(not(feature = "scripting"))]
         CommandId::OpenScripting => None,
         CommandId::OpenLogging => Some(AppDockTab::Logging),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ShortcutScope {
-    Anywhere,
-    WhenKeyboardIsFree,
-}
-
-impl ShortcutScope {
-    fn allows(self, wants_keyboard: bool) -> bool {
-        matches!(self, Self::Anywhere) || !wants_keyboard
-    }
-}
-
-fn shortcut_for_key(
-    key: egui::Key,
-    command_modifier: bool,
-) -> Option<(commands::CommandId, ShortcutScope)> {
-    use ShortcutScope::{Anywhere, WhenKeyboardIsFree};
-    use commands::CommandId;
-    match (key, command_modifier) {
-        (egui::Key::S, true) => Some((CommandId::SaveLayout, Anywhere)),
-        (egui::Key::L, true) => Some((CommandId::LoadLayout, Anywhere)),
-        (egui::Key::R, true) => Some((CommandId::RunPalette, Anywhere)),
-        (egui::Key::E, true) => Some((CommandId::ToggleDataBrowser, Anywhere)),
-        (egui::Key::T, true) => Some((CommandId::ToggleScene3d, Anywhere)),
-        (egui::Key::O, true) => Some((CommandId::Open, Anywhere)),
-        (egui::Key::F1, _) => Some((CommandId::OpenDiagnostics, Anywhere)),
-        (egui::Key::F2, _) => Some((CommandId::OpenPerformance, Anywhere)),
-        (egui::Key::F3, _) => Some((CommandId::OpenMarkers, Anywhere)),
-        (egui::Key::F9, _) => Some((CommandId::OpenScripting, Anywhere)),
-        (egui::Key::F12, _) => Some((CommandId::OpenLogging, Anywhere)),
-        (egui::Key::Space, _) => Some((CommandId::TogglePlayback, WhenKeyboardIsFree)),
-        (egui::Key::Home, _) => Some((CommandId::JumpStart, WhenKeyboardIsFree)),
-        (egui::Key::End, _) => Some((CommandId::JumpEnd, WhenKeyboardIsFree)),
-        (egui::Key::ArrowLeft, _) => Some((CommandId::StepLeft, WhenKeyboardIsFree)),
-        (egui::Key::ArrowRight, _) => Some((CommandId::StepRight, WhenKeyboardIsFree)),
-        (egui::Key::M, _) => Some((CommandId::AddMarker, WhenKeyboardIsFree)),
-        (egui::Key::Equals, _) => Some((CommandId::EqualizePlots, WhenKeyboardIsFree)),
         _ => None,
     }
 }

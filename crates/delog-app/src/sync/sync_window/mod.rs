@@ -16,13 +16,19 @@ use crate::sync::sync_alignment::{
 };
 use crate::ui::fuzzy::fuzzy_match_score;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum OffsetParseError {
+    #[error("invalid offset syntax")]
     Syntax,
+    #[error("invalid offset number")]
     Number,
+    #[error("invalid offset unit")]
     Unit,
+    #[error("offset must be finite")]
     NonFinite,
+    #[error("offset must resolve to whole microseconds")]
     FractionalMicrosecond,
+    #[error("offset is out of range")]
     Overflow,
 }
 

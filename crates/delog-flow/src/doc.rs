@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fmt;
 
 use serde_json::{Map, Value, json};
 
@@ -15,29 +14,15 @@ pub(crate) fn required_version(graph: &Graph) -> u32 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DocError {
+    #[error("missing delog_dataflow version")]
     MissingVersion,
+    #[error("unsupported data-flow document version {0}")]
     UnsupportedVersion(u32),
+    #[error("invalid data-flow document: {0}")]
     Invalid(String),
 }
-
-impl fmt::Display for DocError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingVersion => formatter.write_str("missing delog_dataflow version"),
-            Self::UnsupportedVersion(version) => {
-                write!(
-                    formatter,
-                    "unsupported data-flow document version {version}"
-                )
-            }
-            Self::Invalid(message) => write!(formatter, "invalid data-flow document: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for DocError {}
 
 pub fn to_json(graph: &Graph) -> Value {
     let nodes: Vec<Value> = graph.nodes.iter().map(node_to_json).collect();
@@ -143,7 +128,7 @@ pub fn from_json(value: &Value) -> Result<Graph, DocError> {
         if !matches!(from.kind, NodeKind::Unknown(_)) && !matches!(to.kind, NodeKind::Unknown(_)) {
             graph
                 .connect(edge.from, edge.from_port, edge.to, edge.to_port)
-                .map_err(|error| invalid(&format!("{error:?}")))?;
+                .map_err(|error| invalid(&error.to_string()))?;
             continue;
         }
         if edge.from == edge.to {
@@ -203,7 +188,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::Output(_) => "output",
         #[cfg(feature = "scripting")]
         NodeKind::Script(_) => "script",
-        NodeKind::Unknown(_) => unreachable!(),
+        NodeKind::Unknown(_) => unreachable!("unknown nodes return raw JSON before tag selection"),
     };
     object.insert("type".to_owned(), Value::String(tag.to_owned()));
     Value::Object(object)
@@ -584,6 +569,7 @@ mod tests {
         let back = to_json(&g);
         assert_eq!(back["nodes"][0]["type"], "resample");
         assert_eq!(back["nodes"][0]["hz"], 50);
+        assert_eq!(back["nodes"][0], raw["nodes"][0]);
     }
 
     #[test]

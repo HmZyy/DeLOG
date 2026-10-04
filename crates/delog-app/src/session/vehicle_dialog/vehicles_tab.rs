@@ -654,6 +654,7 @@ fn apply_pending(state: &mut VehicleDialog, snapshot: &StoreSnapshot, pending: P
     }
     if let Some(i) = pending.duplicate {
         let mut copy = state.drafts[i].clone();
+        copy.runtime = crate::scene3d::vehicle::VehicleRuntime::unassigned();
         copy.label = format!("{} copy", copy.label);
         state.drafts.insert(i + 1, copy);
         state.selected_vehicle = i + 1;

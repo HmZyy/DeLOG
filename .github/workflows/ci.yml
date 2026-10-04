@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev \
+            libudev-dev libpython3-dev
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install scripting Python packages
+        run: |
+          python3 -m pip install --user --break-system-packages \
+            numpy==2.1.1 scipy==1.14.1 bottleneck==1.4.0 cffi==1.17.1
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+      - run: cargo test --workspace --locked --exclude delog-script -- --test-threads=1
+      - run: cargo test -p delog-script --locked -- --test-threads=1

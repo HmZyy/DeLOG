@@ -1,6 +1,5 @@
 //! Immutable store snapshots and wait-free publication.
 
-use std::error::Error;
 use std::fmt;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -54,10 +53,13 @@ impl fmt::Debug for DataStore {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotError {
+    #[error("invalid topic id {0:?}")]
     InvalidTopicId(TopicId),
+    #[error("duplicate topic store for {0:?}")]
     DuplicateTopicStore(TopicId),
+    #[error("topic {topic:?} schema mismatch: expected `{expected}`, got `{actual}`")]
     TopicStoreSchemaMismatch {
         topic: TopicId,
         expected: String,
@@ -65,8 +67,9 @@ pub enum SnapshotError {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DataStoreError {
+    #[error("store epoch overflow")]
     EpochOverflow,
 }
 
@@ -275,35 +278,6 @@ impl Default for DataStore {
         Self::new()
     }
 }
-
-impl fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidTopicId(id) => write!(f, "invalid topic id {id:?}"),
-            Self::DuplicateTopicStore(id) => write!(f, "duplicate topic store for {id:?}"),
-            Self::TopicStoreSchemaMismatch {
-                topic,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "topic {topic:?} schema mismatch: expected `{expected}`, got `{actual}`"
-            ),
-        }
-    }
-}
-
-impl Error for SnapshotError {}
-
-impl fmt::Display for DataStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EpochOverflow => write!(f, "store epoch overflow"),
-        }
-    }
-}
-
-impl Error for DataStoreError {}
 
 #[cfg(test)]
 mod tests {

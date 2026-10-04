@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use delog_script::params::{ParamStore, ParamValue};
+use delog_api::params::{ParamStore, ParamValue};
 
 pub type Loaded = HashMap<String, HashMap<String, ParamValue>>;
 
@@ -52,7 +52,7 @@ pub fn should_rerun(has_snapshot: bool, script_is_named: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use delog_script::params::{ParamKind, ParamSpec};
+    use delog_api::params::{ParamKind, ParamSpec};
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
