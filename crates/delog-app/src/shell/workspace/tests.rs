@@ -247,6 +247,81 @@ fn prune_removed_fields_keeps_script_trace_until_recreated_field_appears() {
 }
 
 #[test]
+fn prune_removed_fields_rebinds_dataflow_traces_to_recreated_fields() {
+    let mut identity = delog_core::identity::IdentityRegistry::new();
+    let old_source = identity.add_source("dataflow:g");
+    let old_topic = identity.add_topic(old_source, "out").unwrap();
+    let old_field = identity.add_field(old_topic, "alt").unwrap();
+    identity.remove_source(old_source);
+    let new_source = identity.add_source("dataflow:g");
+    let new_topic = identity.add_topic(new_source, "out").unwrap();
+    let new_field = identity.add_field(new_topic, "alt").unwrap();
+    let snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+
+    let mut workspace = Workspace::new();
+    assert!(workspace.add_trace_to_first_plot(old_field));
+    workspace
+        .plot_panes_mut()
+        .next()
+        .unwrap()
+        .trace_mut(old_field)
+        .unwrap()
+        .color = [0.1, 0.2, 0.3, 0.4];
+
+    let removed = workspace.prune_removed_fields(&snapshot);
+
+    assert!(removed.is_empty());
+    assert_eq!(workspace.fields().collect::<Vec<_>>(), vec![new_field]);
+    let pane = workspace.plot_panes().next().unwrap();
+    assert_eq!(pane.traces[0].color, [0.1, 0.2, 0.3, 0.4]);
+}
+
+#[test]
+fn a_dataflow_rerun_keeps_its_traces_through_the_relabel() {
+    let mut identity = delog_core::identity::IdentityRegistry::new();
+    let old_source = identity.add_source("dataflow:g");
+    let old_topic = identity.add_topic(old_source, "out").unwrap();
+    let old_field = identity.add_field(old_topic, "alt").unwrap();
+
+    let mut workspace = Workspace::new();
+    assert!(workspace.add_trace_to_first_plot(old_field));
+    {
+        let pane = workspace.plot_panes_mut().next().unwrap();
+        let trace = pane.trace_mut(old_field).unwrap();
+        trace.color = [0.4, 0.3, 0.2, 0.1];
+        trace.width_px = 4.0;
+        trace.mode = TraceMode::Scatter;
+    }
+
+    let new_source = identity.add_source("dataflow:g");
+    let new_topic = identity.add_topic(new_source, "out").unwrap();
+    let new_field = identity.add_field(new_topic, "alt").unwrap();
+    identity.remove_source(old_source);
+    let removed_snapshot = StoreSnapshot::from_registry(&identity, [], 1).unwrap();
+    workspace.prune_removed_fields(&removed_snapshot);
+
+    assert!(workspace.fields().next().is_none());
+    assert_eq!(
+        workspace.plot_panes().next().unwrap().ghosts[0]
+            .source
+            .as_deref(),
+        Some("dataflow:g")
+    );
+
+    identity.relabel_source(new_source, "dataflow:g").unwrap();
+    let relabelled_snapshot = StoreSnapshot::from_registry(&identity, [], 2).unwrap();
+    assert_eq!(workspace.resolve_ghosts(&relabelled_snapshot), 1);
+
+    let pane = workspace.plot_panes().next().unwrap();
+    assert!(pane.ghosts.is_empty());
+    assert_eq!(pane.traces.len(), 1);
+    assert_eq!(pane.traces[0].field, new_field);
+    assert_eq!(pane.traces[0].color, [0.4, 0.3, 0.2, 0.1]);
+    assert_eq!(pane.traces[0].width_px, 4.0);
+    assert_eq!(pane.traces[0].mode, TraceMode::Scatter);
+}
+
+#[test]
 fn scene_pane_toggles_a_single_instance_on_and_off() {
     fn scene_count(w: &Workspace) -> usize {
         w.tree

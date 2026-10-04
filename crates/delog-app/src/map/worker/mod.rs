@@ -678,9 +678,16 @@ fn controller_loop(
                 &status_snapshot,
             );
         }
+        let (snapshots, mut requests) = {
+            let desired = desired.lock().unwrap();
+            (
+                desired.clone(),
+                std::mem::take(&mut *ingress.lock().unwrap()),
+            )
+        };
         apply_desired_snapshots(
-            &desired,
-            &ingress,
+            snapshots,
+            &mut requests,
             &mut states,
             &mut pending,
             &mut ready_order,
@@ -690,7 +697,7 @@ fn controller_loop(
             &mut controller_desired,
         );
         drain_ingress(
-            &ingress,
+            requests,
             &mut states,
             &mut pending,
             &mut latest_generations,
@@ -776,8 +783,8 @@ fn controller_loop(
 
 #[allow(clippy::too_many_arguments)]
 fn apply_desired_snapshots(
-    desired: &Mutex<HashMap<MapScopeId, DesiredSnapshot>>,
-    ingress: &Mutex<Vec<IngressRequest>>,
+    snapshots: HashMap<MapScopeId, DesiredSnapshot>,
+    requests: &mut Vec<IngressRequest>,
     states: &mut HashMap<Key, (RequestState, u64)>,
     pending: &mut BinaryHeap<Pending>,
     ready_order: &mut VecDeque<Key>,
@@ -786,7 +793,6 @@ fn apply_desired_snapshots(
     applied_revisions: &mut HashMap<MapScopeId, u64>,
     controller_desired: &mut HashMap<MapScopeId, DesiredSnapshot>,
 ) {
-    let snapshots = desired.lock().unwrap().clone();
     if snapshots.keys().all(|scope| {
         applied_revisions.get(scope) == snapshots.get(scope).map(|snapshot| &snapshot.revision)
     }) && applied_revisions.len() == snapshots.len()
@@ -832,7 +838,7 @@ fn apply_desired_snapshots(
             .get(&key.0)
             .is_some_and(|snapshot| snapshot.contains(key))
     });
-    ingress.lock().unwrap().retain(|item| {
+    requests.retain(|item| {
         controller_desired
             .get(&item.request.scope)
             .is_some_and(|snapshot| {
@@ -891,13 +897,12 @@ fn handle_command(
 }
 
 fn drain_ingress(
-    ingress: &Mutex<Vec<IngressRequest>>,
+    requests: Vec<IngressRequest>,
     states: &mut HashMap<Key, (RequestState, u64)>,
     pending: &mut BinaryHeap<Pending>,
     latest_generations: &mut HashMap<MapScopeId, u64>,
     epoch: u64,
 ) {
-    let requests = std::mem::take(&mut *ingress.lock().unwrap());
     for item in requests {
         let request = item.request;
         let latest = latest_generations.entry(request.scope).or_default();

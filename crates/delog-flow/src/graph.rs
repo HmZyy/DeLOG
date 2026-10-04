@@ -50,6 +50,7 @@ pub enum NodeKind {
         kind: ConversionKind,
     },
     Filter(crate::filter::FilterSpec),
+    Signal(crate::signal::SignalFilter),
     Align {
         mode: AlignMode,
     },
@@ -176,7 +177,7 @@ impl NodeKind {
                 port("A", vec![PortType::Signal]),
                 port("B", vec![PortType::Signal, PortType::Scalar]),
             ],
-            Self::ScaleOffset { .. } | Self::Convert { .. } | Self::Filter(_) => {
+            Self::ScaleOffset { .. } | Self::Convert { .. } | Self::Filter(_) | Self::Signal(_) => {
                 vec![port("In", vec![PortType::Signal])]
             }
             Self::Align { .. } => vec![
@@ -215,6 +216,7 @@ impl NodeKind {
             | Self::ScaleOffset { .. }
             | Self::Convert { .. }
             | Self::Filter(_)
+            | Self::Signal(_)
             | Self::Align { .. } => single(vec![PortType::Signal]),
             #[cfg(feature = "scripting")]
             Self::Script(spec) => spec
@@ -240,6 +242,7 @@ impl NodeKind {
             Self::ScaleOffset { .. } => "Scale / Offset".to_owned(),
             Self::Convert { kind } => kind.label().to_owned(),
             Self::Filter(spec) => spec.filter.label().to_owned(),
+            Self::Signal(filter) => filter.label().to_owned(),
             Self::Align { .. } => "Align to Timeline".to_owned(),
             Self::Output(spec) => format!("Output: {}", spec.topic),
             #[cfg(feature = "scripting")]

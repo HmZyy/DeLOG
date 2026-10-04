@@ -149,6 +149,9 @@ impl DataFlowEditor {
                         rows.hinted("Threshold", FILTER_HINT, |ui| number(ui, &mut spec.value));
                     }
                 }
+                NodeKind::Signal(filter) => {
+                    super::signal_controls::signal_rows(rows, filter);
+                }
                 NodeKind::Convert { kind } => {
                     rows.property("Conversion", |ui| {
                         combo(ui, "conversion", kind.label(), |ui| {
@@ -298,6 +301,7 @@ impl DataFlowEditor {
         }
         let invalid = match &edited {
             NodeKind::Filter(spec) => spec.validate().err(),
+            NodeKind::Signal(filter) => filter.validate().err(),
             _ => None,
         };
         if let Some(command) = structural_edit {
