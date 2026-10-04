@@ -259,6 +259,12 @@ fn evaluate_inner(
                     report.diagnostics.push(Diagnostic { node: id, message });
                     continue;
                 }
+                if let NodeKind::Signal(filter) = kind
+                    && let Err(message) = filter.validate()
+                {
+                    report.diagnostics.push(Diagnostic { node: id, message });
+                    continue;
+                }
                 let fingerprint = fingerprint(kind, &input_fingerprints, None, None);
                 if restore_cached(id, fingerprint, cache, &mut report) {
                     fingerprints.insert(id, fingerprint);
@@ -395,6 +401,18 @@ fn evaluate_kernel(kind: &NodeKind, inputs: &[Value]) -> Result<(Vec<Value>, Vec
                     meta: input.meta.clone(),
                 }),
                 Vec::new(),
+            )
+        }
+        NodeKind::Signal(filter) => {
+            let input = require_signal(inputs.first())?;
+            let (values, messages) = filter.apply(&input.t, &input.v)?;
+            (
+                Value::Signal(Signal {
+                    t: Arc::clone(&input.t),
+                    v: Arc::new(values),
+                    meta: input.meta.clone(),
+                }),
+                messages,
             )
         }
         NodeKind::Convert { kind } => {
@@ -1081,6 +1099,49 @@ mod tests {
         let sum = &signal(&report, add).v;
         assert_eq!(sum[0..2], [11.0, 22.0]);
         assert!(sum[2].is_nan());
+    }
+
+    #[test]
+    fn signal_filter_keeps_timeline_unit_and_nan_samples() {
+        use crate::signal::SignalFilter;
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let x = add_node(&mut graph, field("IMU", "AccX"));
+        let median = add_node(
+            &mut graph,
+            NodeKind::Signal(SignalFilter::Median { window_s: 0.001 }),
+        );
+        graph.connect(x, 0, median, 0).unwrap();
+
+        let report = eval_single(&graph, &snapshot, median);
+        let out = signal(&report, median);
+        assert_eq!(out.v[..2], [1.5, 1.5]);
+        assert!(out.v[2].is_nan());
+        assert_eq!(out.meta, signal(&report, x).meta);
+        assert!(Arc::ptr_eq(&out.t, &signal(&report, x).t));
+    }
+
+    #[test]
+    fn invalid_signal_filter_reports_a_diagnostic_without_a_value() {
+        use crate::signal::SignalFilter;
+        let snapshot = snapshot_gps_baro();
+        let mut graph = Graph::new("g");
+        let x = add_node(&mut graph, field("GPS", "Alt"));
+        let filter = add_node(
+            &mut graph,
+            NodeKind::Signal(SignalFilter::Lowpass {
+                cutoff_hz: f64::NAN,
+                order: 2,
+                zero_phase: true,
+            }),
+        );
+        graph.connect(x, 0, filter, 0).unwrap();
+
+        let report = eval_single(&graph, &snapshot, filter);
+        assert!(!report.values.contains_key(&filter));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.node == filter && diagnostic.message == "cutoff must be positive"
+        }));
     }
 
     #[test]

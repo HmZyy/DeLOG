@@ -170,6 +170,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         }
         NodeKind::Align { mode } => Map::from_iter([("mode".to_owned(), json!(mode.as_str()))]),
         NodeKind::Filter(spec) => serialized_object(spec),
+        NodeKind::Signal(filter) => serialized_object(filter),
         NodeKind::Output(spec) => serialized_object(spec),
         #[cfg(feature = "scripting")]
         NodeKind::Script(spec) => serialized_object(spec),
@@ -185,6 +186,7 @@ pub(crate) fn node_kind_json(kind: &NodeKind) -> Value {
         NodeKind::Convert { .. } => "convert",
         NodeKind::Align { .. } => "align",
         NodeKind::Filter(_) => "filter",
+        NodeKind::Signal(_) => "signal",
         NodeKind::Output(_) => "output",
         #[cfg(feature = "scripting")]
         NodeKind::Script(_) => "script",
@@ -264,6 +266,7 @@ fn node_from_json(value: &Value) -> Result<Node, DocError> {
             }
         }
         "filter" => NodeKind::Filter(decode_value(value)?),
+        "signal" => NodeKind::Signal(decode_value(value)?),
         "output" => NodeKind::Output(decode_value::<OutputSpec>(value)?),
         #[cfg(feature = "scripting")]
         "script" => NodeKind::Script(decode_value::<crate::script::ScriptSpec>(value)?),
@@ -537,6 +540,28 @@ mod tests {
             }
             other => panic!("expected data_field, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn signal_filters_round_trip_and_reject_malformed_settings() {
+        use crate::signal::{SignalFilter, SignalFilterKind};
+        for filter in SignalFilterKind::ALL.map(SignalFilter::new) {
+            let mut graph = Graph::new("signals");
+            add(&mut graph, NodeKind::Signal(filter.clone()));
+            let json = to_json(&graph);
+            assert_eq!(json["nodes"][0]["type"], "signal");
+            assert_eq!(from_json(&json).unwrap(), graph);
+            for (field, invalid) in [("filter", json!("bogus")), ("filter", Value::Null)] {
+                let mut bad = json.clone();
+                bad["nodes"][0][field] = invalid;
+                assert!(from_json(&bad).is_err(), "{field}: {bad}");
+            }
+        }
+        let raw = document(
+            json!([{"id": 1, "pos": [0.0, 0.0], "type": "signal", "filter": "lowpass", "cutoff_hz": 5.0, "order": "2", "zero_phase": true}]),
+            json!([]),
+        );
+        assert!(from_json(&raw).is_err());
     }
 
     #[test]
