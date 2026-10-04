@@ -56,6 +56,13 @@ fn default_live_overlap_secs() -> f32 {
 fn default_live_throttle_ms() -> u32 {
     200
 }
+fn default_gpu_block_size_mib() -> u32 {
+    DEFAULT_GPU_BLOCK_SIZE_MIB
+}
+
+const DEFAULT_GPU_BLOCK_SIZE_MIB: u32 = 512;
+const MIN_GPU_BLOCK_SIZE_MIB: u32 = 16;
+const MAX_GPU_BLOCK_SIZE_MIB: u32 = 2048;
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
@@ -68,6 +75,8 @@ pub struct AppSettings {
     pub render_mode: RenderMode,
     #[serde(default)]
     pub present_mode: VsyncMode,
+    #[serde(default)]
+    pub gpu_memory: GpuMemorySettings,
     #[serde(default)]
     pub live_connection: LiveConnectionSettings,
     #[serde(default)]
@@ -113,6 +122,7 @@ impl Default for AppSettings {
             show_fps: false,
             render_mode: RenderMode::default(),
             present_mode: VsyncMode::On,
+            gpu_memory: GpuMemorySettings::default(),
             live_connection: LiveConnectionSettings::default(),
             scene3d: Scene3dSettings::default(),
             plot: PlotDisplay::default(),
@@ -123,6 +133,37 @@ impl Default for AppSettings {
             updates: UpdateSettings::default(),
             dataflow: DataFlowSettings::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GpuMemorySettings {
+    #[serde(default)]
+    pub manual_block_size: bool,
+    #[serde(default = "default_gpu_block_size_mib")]
+    pub block_size_mib: u32,
+}
+
+impl Default for GpuMemorySettings {
+    fn default() -> Self {
+        Self {
+            manual_block_size: false,
+            block_size_mib: default_gpu_block_size_mib(),
+        }
+    }
+}
+
+impl GpuMemorySettings {
+    pub fn memory_hints(self) -> Option<eframe::wgpu::MemoryHints> {
+        self.manual_block_size.then(|| {
+            let bytes = u64::from(
+                self.block_size_mib
+                    .clamp(MIN_GPU_BLOCK_SIZE_MIB, MAX_GPU_BLOCK_SIZE_MIB),
+            ) << 20;
+            eframe::wgpu::MemoryHints::Manual {
+                suballocated_device_memory_block_size: bytes..bytes,
+            }
+        })
     }
 }
 
@@ -938,6 +979,21 @@ fn general_tab(ui: &mut egui::Ui, settings: &mut AppSettings) -> SettingsChange 
                         ui.selectable_value(&mut settings.present_mode, mode, mode.label());
                     }
                 });
+            ui.end_row();
+
+            let g = &mut settings.gpu_memory;
+            ui.label("Large GPU memory blocks").on_hover_text("Requires a restart.");
+            ui.checkbox(&mut g.manual_block_size, "");
+            ui.end_row();
+
+            ui.label("GPU memory block size");
+            ui.add_enabled(
+                g.manual_block_size,
+                egui::DragValue::new(&mut g.block_size_mib)
+                    .range(MIN_GPU_BLOCK_SIZE_MIB..=MAX_GPU_BLOCK_SIZE_MIB)
+                    .speed(4.0)
+                    .suffix(" MiB"),
+            );
             ui.end_row();
 
             let f = &mut settings.font;
@@ -1814,6 +1870,34 @@ mod tests {
         let json = r#"{"theme":"catppuccin_mocha"}"#;
         let s: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(s.present_mode, VsyncMode::On);
+    }
+
+    #[test]
+    fn gpu_memory_blocks_default_to_off_at_512_mib() {
+        let s: AppSettings = serde_json::from_str(r#"{"theme":"catppuccin_mocha"}"#).unwrap();
+        assert_eq!(s.gpu_memory, GpuMemorySettings::default());
+        assert!(!s.gpu_memory.manual_block_size);
+        assert_eq!(s.gpu_memory.block_size_mib, 512);
+        assert!(s.gpu_memory.memory_hints().is_none());
+    }
+
+    #[test]
+    fn manual_gpu_memory_blocks_map_to_clamped_fixed_block_hints() {
+        let block = |block_size_mib| {
+            let settings = GpuMemorySettings {
+                manual_block_size: true,
+                block_size_mib,
+            };
+            match settings.memory_hints() {
+                Some(eframe::wgpu::MemoryHints::Manual {
+                    suballocated_device_memory_block_size,
+                }) => suballocated_device_memory_block_size,
+                other => panic!("unexpected memory hints {other:?}"),
+            }
+        };
+        assert_eq!(block(256), (256 << 20)..(256 << 20));
+        assert_eq!(block(1), (16 << 20)..(16 << 20));
+        assert_eq!(block(1 << 20), (2048 << 20)..(2048 << 20));
     }
 
     #[test]
