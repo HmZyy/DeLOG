@@ -107,6 +107,44 @@ valid. Invalid limits produce a diagnostic instead of a filtered output.
 New single-value filters start at `0`; range filters start at `0` through `1`.
 These native filters work without Python.
 
+## Smoothing and frequency filters
+
+The **Signal** category in the Add menu holds filters that reshape a signal
+instead of masking it. Each one has an **In** port and returns a signal with
+the input's timestamps, sample count, timeline, and unit. Select the node to
+edit its settings in the inspector; the canvas shows a one-line summary.
+
+| Node | Settings | Effect |
+| --- | --- | --- |
+| Lowpass | Cutoff, Order, Zero phase | Keeps content below the cutoff |
+| Highpass | Cutoff, Order, Zero phase | Keeps content above the cutoff and removes offsets and drift |
+| Bandpass | Low cutoff, High cutoff, Order, Zero phase | Keeps content between the two cutoffs |
+| Notch | Center, Bandwidth, Zero phase | Removes a narrow band, such as motor or propeller noise |
+| Moving Average | Window (seconds) | Mean of the samples inside a centered time window |
+| Median | Window (seconds) | Median of the samples inside a centered time window; removes isolated spikes |
+| Savitzky-Golay | Window (samples, odd), Polynomial order | Fits a polynomial around each sample; smooths while keeping peak shape |
+
+Lowpass, Highpass, and Bandpass are Butterworth filters of order 1 to 8;
+higher orders roll off more steeply. Frequencies are in Hz, and the sample
+rate is taken from the median spacing between timestamps. A cutoff or center
+at or above half that rate (the Nyquist limit) produces a diagnostic.
+
+With **Zero phase** checked, the default, the filter runs forward and then
+backward over the data, so the output has no time lag. Uncheck it to run a
+single causal pass, which reproduces what a filter running on the vehicle
+would have produced, lag included.
+
+Moving Average and Median windows are measured in time, so they stay correct
+when the sample rate varies. Savitzky-Golay works in samples and assumes a
+constant rate; it reports a diagnostic when the timestamps are unevenly
+spaced. It needs at least as many samples as its window.
+
+NaN gaps and missing data are never smoothed over. A NaN, or a time gap longer
+than five times the median spacing, splits the signal into segments that are
+filtered independently, and NaN samples stay NaN. A Filters node placed before
+a Signal node therefore removes rejected samples without dragging the filtered
+output toward them.
+
 ## Timelines and alignment
 
 Two signals having the same number of rows does not mean their samples occurred
@@ -142,6 +180,7 @@ Units are metadata. The evaluator does not perform dimensional conversion.
 | Multiply / Divide two signals | Cleared |
 | Scale / Offset | The input unit |
 | Filters | The input unit |
+| Signal filters | The input unit |
 | Align to Timeline | The Data input unit |
 | Output field | The configured override, or the incoming signal unit when no override is set |
 
