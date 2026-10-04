@@ -3,7 +3,6 @@
 //! Multipliers are applied in f64; a null or NaN sample is an `Empty` cell
 //! (NaN is a gap, not a missing sample).
 
-use std::error::Error;
 use std::fmt;
 
 use crate::field_view::{FieldView, FieldViewError, value_at};
@@ -24,27 +23,19 @@ pub enum Cell {
     Num(f64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExportError {
+    #[error("no fields selected for export")]
     NoFields,
+    #[error("export window end must be after start")]
     InvalidWindow,
+    #[error("resample dt must be positive")]
     InvalidDt,
+    #[error("field {0:?} is not numeric")]
     NotNumeric(FieldId),
+    #[error("field {0:?}: {1}")]
     Field(FieldId, FieldViewError),
 }
-
-impl fmt::Display for ExportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoFields => write!(f, "no fields selected for export"),
-            Self::InvalidWindow => write!(f, "export window end must be after start"),
-            Self::InvalidDt => write!(f, "resample dt must be positive"),
-            Self::NotNumeric(id) => write!(f, "field {id:?} is not numeric"),
-            Self::Field(id, e) => write!(f, "field {id:?}: {e}"),
-        }
-    }
-}
-impl Error for ExportError {}
 
 /// Ascending iterator over one field's in-range (effective_time, Cell) samples.
 /// Iterates in spine order: an out-of-order spine exports in stored order.

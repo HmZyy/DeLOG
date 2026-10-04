@@ -180,17 +180,15 @@ impl DelogApp {
             if let Some(outcome) = outcome {
                 if matches!(&outcome, StepOutcome::Failed(_))
                     && matches!(active.operation, ActiveOperation::Flow)
-                {
-                    if let Some(mut owned) = sequences
+                    && let Some(mut owned) = sequences
                         .flows
                         .remove(&(active.sequence.clone(), active.request.step.id))
-                    {
-                        sequences
-                            .cleanup
-                            .entry(active.sequence.clone())
-                            .or_default()
-                            .push(owned.flow.controller.stop_owned(&sender));
-                    }
+                {
+                    sequences
+                        .cleanup
+                        .entry(active.sequence.clone())
+                        .or_default()
+                        .push(owned.flow.controller.stop_owned(&sender));
                 }
                 sequences.finish(&active.sequence, active.request.token, outcome);
             } else {
@@ -236,12 +234,10 @@ impl DelogApp {
                     }
                     StepKind::Script => Ok(Some(ActiveOperation::ScriptReady(None))),
                     StepKind::Dataflow => {
-                        let graph = crate::dataflow::store::GraphStore::default_dir()
-                            .ok_or("application data directory is unavailable".to_owned())
-                            .and_then(|dir| {
-                                crate::dataflow::store::GraphStore::new(dir)
-                                    .load(&request.step.reference)
-                            });
+                        let graph = super::load_headless_graph(
+                            &request.step.reference,
+                            crate::dataflow::store::GraphStore::default_dir(),
+                        );
                         match graph {
                             Ok(graph) => {
                                 let key = (id.clone(), request.step.id);

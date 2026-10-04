@@ -912,6 +912,12 @@ fn saturated_queue_dispatches_new_high_priority_before_existing_low_priority() {
         observed.recv_timeout(Duration::from_secs(2)).unwrap(),
         "/high"
     );
+    for _ in 0..200 {
+        if manager.status().queued == QUEUE_CAPACITY - 1 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(manager.status().queued, QUEUE_CAPACITY - 1);
     for _ in 0..WORKERS + 1 {
         let _ = release.send(());

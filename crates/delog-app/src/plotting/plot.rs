@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "scripting")]
+use delog_api::control::ScriptOwner;
 use delog_core::identity::FieldId;
 use delog_core::time::TimeRange;
 use delog_render::palette;
@@ -43,6 +45,11 @@ impl ViewX {
         let span_us = span_us.max(1);
         let min_us = range.max_us.saturating_sub(span_us).max(range.min_us);
         Self::new(min_us, range.max_us)
+    }
+
+    pub fn ending_at(end_us: i64, span_us: i64) -> Self {
+        let span_us = span_us.max(1);
+        Self::from_min_and_span(end_us as i128 - span_us as i128, span_us)
     }
 
     pub fn span_us(&self) -> i64 {
@@ -113,6 +120,8 @@ pub struct TraceRef {
     pub visible: bool,
     /// Session-only, per-plot rename. `None` = derived `topic.field` label.
     pub label_override: Option<String>,
+    #[cfg(feature = "scripting")]
+    pub owner: Option<ScriptOwner>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,7 +200,7 @@ pub fn rename_value(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlotPane {
     pub traces: Vec<TraceRef>,
     pub ghosts: Vec<GhostTrace>,
@@ -241,6 +250,8 @@ impl PlotPane {
             mode: TraceMode::Line,
             visible: true,
             label_override: None,
+            #[cfg(feature = "scripting")]
+            owner: None,
         });
         true
     }
@@ -484,6 +495,12 @@ mod tests {
     }
 
     #[test]
+    fn ending_at_keeps_the_span_even_before_the_range_start() {
+        assert_eq!(ViewX::ending_at(10_000, 2_000), ViewX::new(8_000, 10_000));
+        assert_eq!(ViewX::ending_at(1_000, 4_000), ViewX::new(-3_000, 1_000));
+    }
+
+    #[test]
     fn tail_lock_clamps_to_full_range_when_span_is_too_large() {
         let range = TimeRange::new(1_000, 3_000).unwrap();
         assert_eq!(
@@ -502,6 +519,8 @@ mod tests {
             mode: TraceMode::Step,
             visible: false,
             label_override: Some("v".to_string()),
+            #[cfg(feature = "scripting")]
+            owner: None,
         };
         assert!(pane.add_trace_ref(t.clone()));
         assert_eq!(pane.traces.len(), 1);

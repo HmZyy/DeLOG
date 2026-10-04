@@ -58,37 +58,37 @@ pub trait ScriptNodeHost: Send {
     ) -> Result<Vec<ScriptOutput>, String>;
 }
 
-pub const HOST_UNAVAILABLE: &str = "Python scripting is not available in this build.";
+pub const HOST_UNAVAILABLE: &str = "scripting with Python is not available in this build";
 
 pub fn validate_spec(spec: &ScriptSpec) -> Result<(), String> {
     if spec.outputs.is_empty() {
-        return Err("Script node must declare at least one output.".to_owned());
+        return Err("script node must declare at least one output".to_owned());
     }
     if spec.code.trim().is_empty() {
-        return Err("Script code is empty.".to_owned());
+        return Err("script code is empty".to_owned());
     }
     let mut seen = HashSet::new();
     for input in &spec.inputs {
         if !is_valid_identifier(&input.name) {
             return Err(format!(
-                "Input port name '{}' is not a valid Python identifier.",
+                "input port name '{}' is not a valid Python identifier",
                 input.name
             ));
         }
         if !seen.insert(input.name.as_str()) {
-            return Err(format!("Duplicate input port name '{}'.", input.name));
+            return Err(format!("duplicate input port name '{}'", input.name));
         }
     }
     let mut seen = HashSet::new();
     for output in &spec.outputs {
         if !is_valid_identifier(&output.name) {
             return Err(format!(
-                "Output port name '{}' is not a valid Python identifier.",
+                "output port name '{}' is not a valid Python identifier",
                 output.name
             ));
         }
         if !seen.insert(output.name.as_str()) {
-            return Err(format!("Duplicate output port name '{}'.", output.name));
+            return Err(format!("duplicate output port name '{}'", output.name));
         }
     }
     Ok(())
@@ -135,7 +135,7 @@ pub fn bind_outputs(
 ) -> Result<Vec<Value>, String> {
     if raw.len() != spec.outputs.len() {
         return Err(format!(
-            "Script returned {} output(s), expected {}.",
+            "script returned {} output(s), expected {}",
             raw.len(),
             spec.outputs.len()
         ));
@@ -161,13 +161,13 @@ pub fn bind_outputs(
         if let Some(times) = &raw_output.times {
             if times.len() != raw_output.values.len() {
                 return Err(format!(
-                    "Output '{}': times and values must have the same length.",
+                    "output '{}': times and values must have the same length",
                     output_spec.name
                 ));
             }
             if !times.windows(2).all(|pair| pair[0] <= pair[1]) {
                 return Err(format!(
-                    "Output '{}': times must be sorted ascending.",
+                    "output '{}': times must be sorted ascending",
                     output_spec.name
                 ));
             }
@@ -178,7 +178,7 @@ pub fn bind_outputs(
             None => {
                 let Some(timeline) = shared_timeline else {
                     return Err(format!(
-                        "Output '{}' must return explicit times because the inputs are on different timelines.",
+                        "output '{}' must return explicit times because the inputs are on different timelines",
                         output_spec.name
                     ));
                 };
@@ -188,7 +188,7 @@ pub fn bind_outputs(
                     .expect("shared_timeline came from a signal input");
                 if signal.v.len() != raw_output.values.len() {
                     return Err(format!(
-                        "Output '{}': values length does not match the shared input timeline.",
+                        "output '{}': values length does not match the shared input timeline",
                         output_spec.name
                     ));
                 }
@@ -326,6 +326,100 @@ mod script_tests {
             Value::Signal(signal) => signal.meta.timeline,
             Value::Scalar(_) => panic!("expected signal"),
         }
+    }
+
+    #[test]
+    fn script_validation_and_output_errors_follow_style() {
+        let mut spec = ScriptSpec {
+            name: "test".into(),
+            inputs: vec![],
+            outputs: vec![],
+            code: "".into(),
+        };
+        assert_eq!(
+            validate_spec(&spec).unwrap_err(),
+            "script node must declare at least one output"
+        );
+        spec.outputs.push(ScriptOutputSpec {
+            name: "out".into(),
+            unit: None,
+        });
+        assert_eq!(validate_spec(&spec).unwrap_err(), "script code is empty");
+        spec.code = "pass".into();
+        spec.inputs.push(ScriptInputSpec {
+            name: "1bad".into(),
+        });
+        assert_eq!(
+            validate_spec(&spec).unwrap_err(),
+            "input port name '1bad' is not a valid Python identifier"
+        );
+        spec.inputs[0].name = "good".into();
+        spec.inputs.push(ScriptInputSpec {
+            name: "good".into(),
+        });
+        assert_eq!(
+            validate_spec(&spec).unwrap_err(),
+            "duplicate input port name 'good'"
+        );
+        spec.inputs.clear();
+        spec.outputs[0].name = "1bad".into();
+        assert_eq!(
+            validate_spec(&spec).unwrap_err(),
+            "output port name '1bad' is not a valid Python identifier"
+        );
+        spec.outputs[0].name = "out".into();
+        spec.outputs.push(ScriptOutputSpec {
+            name: "out".into(),
+            unit: None,
+        });
+        assert_eq!(
+            validate_spec(&spec).unwrap_err(),
+            "duplicate output port name 'out'"
+        );
+        spec.outputs.pop();
+        assert_eq!(
+            bind_outputs(NodeId(1), &spec, &[], vec![]).unwrap_err(),
+            "script returned 0 output(s), expected 1"
+        );
+        let output = |times, values| ScriptOutput {
+            times,
+            values,
+            unit: None,
+        };
+        assert_eq!(
+            bind_outputs(NodeId(1), &spec, &[], vec![output(Some(vec![1]), vec![])]).unwrap_err(),
+            "output 'out': times and values must have the same length"
+        );
+        assert_eq!(
+            bind_outputs(
+                NodeId(1),
+                &spec,
+                &[],
+                vec![output(Some(vec![2, 1]), vec![1.0, 2.0])],
+            )
+            .unwrap_err(),
+            "output 'out': times must be sorted ascending"
+        );
+        assert_eq!(
+            bind_outputs(NodeId(1), &spec, &[], vec![output(None, vec![1.0])]).unwrap_err(),
+            "output 'out' must return explicit times because the inputs are on different timelines"
+        );
+        let signal = Value::Signal(Signal {
+            t: Arc::new(vec![1, 2]),
+            v: Arc::new(vec![1.0, 2.0]),
+            meta: SignalMeta {
+                timeline: TimelineId::Node(NodeId(2)),
+                unit: None,
+            },
+        });
+        assert_eq!(
+            bind_outputs(NodeId(1), &spec, &[signal], vec![output(None, vec![1.0])]).unwrap_err(),
+            "output 'out': values length does not match the shared input timeline"
+        );
+        assert_eq!(
+            HOST_UNAVAILABLE,
+            "scripting with Python is not available in this build"
+        );
     }
 
     #[test]
@@ -563,7 +657,9 @@ mod script_tests {
             report
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.node == node && diagnostic.message == HOST_UNAVAILABLE)
+                .any(|diagnostic| diagnostic.node == node
+                    && diagnostic.message
+                        == "scripting with Python is not available in this build")
         );
     }
 
