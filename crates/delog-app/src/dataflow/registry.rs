@@ -1,6 +1,7 @@
 use delog_core::align::AlignMode;
 use delog_flow::filter::{FilterKind, FilterSpec};
 use delog_flow::graph::{ConversionKind, NodeKind, OutputFieldSpec, OutputSpec};
+use delog_flow::signal::{SignalFilter, SignalFilterKind};
 
 use crate::ui::fuzzy::fuzzy_match_score;
 
@@ -95,6 +96,48 @@ pub fn templates() -> &'static [NodeTemplate] {
             category: "Filters",
             aliases: &["outside", "exclude range"],
             make: || NodeKind::Filter(FilterSpec::new(FilterKind::OutsideRange)),
+        },
+        NodeTemplate {
+            name: "Lowpass",
+            category: "Signal",
+            aliases: &["lpf", "low pass", "smooth"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::Lowpass)),
+        },
+        NodeTemplate {
+            name: "Highpass",
+            category: "Signal",
+            aliases: &["hpf", "high pass", "detrend"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::Highpass)),
+        },
+        NodeTemplate {
+            name: "Bandpass",
+            category: "Signal",
+            aliases: &["bpf", "band pass"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::Bandpass)),
+        },
+        NodeTemplate {
+            name: "Notch",
+            category: "Signal",
+            aliases: &["band stop", "bandstop", "band reject"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::Notch)),
+        },
+        NodeTemplate {
+            name: "Moving Average",
+            category: "Signal",
+            aliases: &["sma", "mean", "boxcar"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::MovingAverage)),
+        },
+        NodeTemplate {
+            name: "Median",
+            category: "Signal",
+            aliases: &["despike", "spike", "rolling median"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::Median)),
+        },
+        NodeTemplate {
+            name: "Savitzky-Golay",
+            category: "Signal",
+            aliases: &["savgol", "sg", "polynomial"],
+            make: || NodeKind::Signal(SignalFilter::new(SignalFilterKind::SavitzkyGolay)),
         },
         NodeTemplate {
             name: "Radians to Degrees",
@@ -252,6 +295,29 @@ mod tests {
         for ((index, template), kind) in filters.into_iter().zip(FilterKind::ALL) {
             assert_eq!(template.name, kind.label());
             assert_eq!((template.make)(), NodeKind::Filter(FilterSpec::new(kind)));
+            assert_eq!(search_templates(template.name)[0].index, index);
+            for alias in template.aliases {
+                let hits = search_templates(alias);
+                assert_eq!(hits[0].index, index, "alias {alias}");
+                assert_eq!(hits[0].score, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn signal_templates_follow_filters_in_their_own_category() {
+        let all = templates();
+        let signal: Vec<_> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, template)| template.category == "Signal")
+            .collect();
+        assert_eq!(signal.len(), SignalFilterKind::ALL.len());
+        assert!(signal.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1));
+        assert_eq!(all[signal[0].0 - 1].category, "Filters");
+        for ((index, template), kind) in signal.into_iter().zip(SignalFilterKind::ALL) {
+            assert_eq!(template.name, kind.label());
+            assert_eq!((template.make)(), NodeKind::Signal(SignalFilter::new(kind)));
             assert_eq!(search_templates(template.name)[0].index, index);
             for alias in template.aliases {
                 let hits = search_templates(alias);

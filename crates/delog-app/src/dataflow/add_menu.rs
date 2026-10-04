@@ -655,6 +655,9 @@ mod tests {
             for _ in 0..target {
                 rects = frame(&ctx, &mut menu, navigate.clone());
             }
+            for _ in 0..60 {
+                rects = frame(&ctx, &mut menu, Vec::new());
+            }
 
             assert_eq!(menu.highlighted, target);
             assert!(

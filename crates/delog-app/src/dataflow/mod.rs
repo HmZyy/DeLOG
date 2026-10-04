@@ -9,5 +9,6 @@ mod inspector;
 mod inspector_tables;
 pub mod picker;
 pub mod registry;
+mod signal_controls;
 pub mod store;
 pub mod window;
