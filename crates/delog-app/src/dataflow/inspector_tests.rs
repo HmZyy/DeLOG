@@ -287,6 +287,11 @@ fn property_controls_stay_inside_the_inspector_for_every_node_kind() {
             .into_iter()
             .map(|kind| NodeKind::Filter(delog_flow::filter::FilterSpec::new(kind))),
     );
+    kinds.extend(
+        delog_flow::signal::SignalFilterKind::ALL
+            .into_iter()
+            .map(|kind| NodeKind::Signal(delog_flow::signal::SignalFilter::new(kind))),
+    );
     for kind in kinds {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -326,6 +331,61 @@ fn an_invalid_filter_range_reports_the_error_under_a_diagnostics_heading() {
         .expect("the validation message is shown");
     let bounds = message.bounds().unwrap();
     assert!(bounds.x0 >= 0.0 && bounds.x1 <= 320.0, "{bounds:?}");
+}
+
+#[test]
+fn signal_filters_show_their_settings_and_validation_errors() {
+    use delog_flow::signal::{SignalFilter, SignalFilterKind};
+    let cases: [(SignalFilterKind, &[&str]); 7] = [
+        (
+            SignalFilterKind::Lowpass,
+            &["Cutoff", "Order", "Zero phase"],
+        ),
+        (
+            SignalFilterKind::Highpass,
+            &["Cutoff", "Order", "Zero phase"],
+        ),
+        (
+            SignalFilterKind::Bandpass,
+            &["Low cutoff", "High cutoff", "Order", "Zero phase"],
+        ),
+        (
+            SignalFilterKind::Notch,
+            &["Center", "Bandwidth", "Zero phase"],
+        ),
+        (SignalFilterKind::MovingAverage, &["Window"]),
+        (SignalFilterKind::Median, &["Window"]),
+        (
+            SignalFilterKind::SavitzkyGolay,
+            &["Window", "Polynomial order"],
+        ),
+    ];
+    for (kind, labels) in cases {
+        let ctx = context();
+        let mut editor = editor(NodeKind::Signal(SignalFilter::new(kind)));
+        render(&ctx, &mut editor, 320.0, vec![]);
+        let nodes = render(&ctx, &mut editor, 320.0, vec![]);
+        for label in labels {
+            assert!(
+                nodes.iter().any(|node| node.value() == Some(*label)),
+                "{kind:?} is missing {label}"
+            );
+        }
+        assert!(!nodes.iter().any(|node| node.value() == Some("DIAGNOSTICS")));
+    }
+
+    let ctx = context();
+    let mut editor = editor(NodeKind::Signal(SignalFilter::SavitzkyGolay {
+        window: 10,
+        poly_order: 2,
+    }));
+    render(&ctx, &mut editor, 320.0, vec![]);
+    let nodes = render(&ctx, &mut editor, 320.0, vec![]);
+    assert!(nodes.iter().any(|node| node.value() == Some("DIAGNOSTICS")));
+    assert!(nodes.iter().any(|node| {
+        node.value()
+            .is_some_and(|value| value.starts_with("window must be an odd number"))
+    }));
 }
 
 fn painted(
