@@ -7,6 +7,7 @@ pub mod publish;
 pub mod resolve;
 #[cfg(feature = "scripting")]
 pub mod script;
+pub mod signal;
 pub mod types;
 
 #[cfg(test)]
