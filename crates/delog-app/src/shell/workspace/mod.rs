@@ -328,7 +328,7 @@ impl Workspace {
                 let field = pane.traces[i].field;
                 if snapshot.is_field_live(field) {
                     i += 1;
-                } else if let Some(replacement) = resolve_recreated_script_field(snapshot, field) {
+                } else if let Some(replacement) = resolve_recreated_rerun_field(snapshot, field) {
                     if pane.traces.iter().any(|t| t.field == replacement) {
                         pane.traces.remove(i);
                     } else {
@@ -336,7 +336,7 @@ impl Workspace {
                         rebind_text_state(pane, field, replacement);
                         i += 1;
                     }
-                } else if let Some(ghost) = script_ghost_from_removed_trace(snapshot, pane, i) {
+                } else if let Some(ghost) = rerun_ghost_from_removed_trace(snapshot, pane, i) {
                     pane.traces.remove(i);
                     pane.add_ghost(ghost);
                     removed.push(field);
@@ -2316,7 +2316,7 @@ fn take_text_state(pane: &mut PlotPane, field: FieldId) -> (Option<String>, Vec<
     (filter, offsets)
 }
 
-fn script_ghost_from_removed_trace(
+fn rerun_ghost_from_removed_trace(
     snapshot: &StoreSnapshot,
     pane: &mut PlotPane,
     trace_index: usize,
@@ -2328,7 +2328,7 @@ fn script_ghost_from_removed_trace(
         .filter(|field| field.id == trace.field && field.removed)?;
     let topic = snapshot.topic(field.topic)?;
     let source = snapshot.source(topic.entry.source)?;
-    if !source.entry.removed || !source.entry.label.starts_with("script:") {
+    if !source.entry.removed || !is_rerun_source(&source.entry.label) {
         return None;
     }
     let (text_filter, text_offsets) = take_text_state(pane, trace.field);
@@ -2407,7 +2407,11 @@ fn resolve_source_field(
     None
 }
 
-fn resolve_recreated_script_field(snapshot: &StoreSnapshot, old_field: FieldId) -> Option<FieldId> {
+fn is_rerun_source(label: &str) -> bool {
+    label.starts_with("script:") || label.starts_with("dataflow:")
+}
+
+fn resolve_recreated_rerun_field(snapshot: &StoreSnapshot, old_field: FieldId) -> Option<FieldId> {
     let field = snapshot
         .fields
         .get(old_field.index())
@@ -2417,7 +2421,7 @@ fn resolve_recreated_script_field(snapshot: &StoreSnapshot, old_field: FieldId) 
     let source_label = source.entry.label.as_str();
     let topic_name = topic.entry.name.as_str();
     let field_name = field.name.as_str();
-    if !source.entry.removed || !source_label.starts_with("script:") {
+    if !source.entry.removed || !is_rerun_source(source_label) {
         return None;
     }
     resolve_source_field(snapshot, source_label, topic_name, field_name)
