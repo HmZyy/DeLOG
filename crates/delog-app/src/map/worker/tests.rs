@@ -531,13 +531,13 @@ fn repeated_unique_failures_keep_failure_state_bounded_and_evicted_keys_retryabl
     let first = request(1);
     let first_key = (first.scope, first.provider, first.id, first.generation);
     assert!(!states.contains_key(&first_key));
-    let ingress = Mutex::new(vec![IngressRequest {
+    let requests = vec![IngressRequest {
         request: first,
         url: "http://retry".into(),
         sequence: 10_000,
-    }]);
+    }];
     drain_ingress(
-        &ingress,
+        requests,
         &mut states,
         &mut pending,
         &mut latest_generation,
