@@ -48,7 +48,8 @@ pub fn run() -> eframe::Result {
 fn app_native_options() -> eframe::NativeOptions {
     // VSync is configured once at surface creation, so it must be read from the
     // persisted settings here rather than at app construction.
-    let present_mode = crate::config::layout::doc::load_app_settings().present_mode;
+    let settings = crate::config::layout::doc::load_app_settings();
+    let present_mode = settings.present_mode;
 
     let mut options = eframe::NativeOptions {
         viewport: app_viewport(),
@@ -61,22 +62,27 @@ fn app_native_options() -> eframe::NativeOptions {
     };
     options.wgpu_options.present_mode = present_mode.present_mode();
     options.wgpu_options.on_surface_status = std::sync::Arc::new(surface_status_action);
-    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        let base = std::sync::Arc::clone(&setup.device_descriptor);
-        setup.device_descriptor =
-            std::sync::Arc::new(move |adapter| eframe::wgpu::DeviceDescriptor {
-                memory_hints: eframe::wgpu::MemoryHints::Manual {
-                    suballocated_device_memory_block_size: STAGING_SAFE_BLOCK_SIZE
-                        ..STAGING_SAFE_BLOCK_SIZE,
-                },
-                ..base(adapter)
-            });
-    }
+    apply_memory_hints(&mut options, settings.gpu_memory.memory_hints());
 
     options
 }
 
-const STAGING_SAFE_BLOCK_SIZE: u64 = 512 << 20;
+fn apply_memory_hints(
+    options: &mut eframe::NativeOptions,
+    memory_hints: Option<eframe::wgpu::MemoryHints>,
+) {
+    let Some(memory_hints) = memory_hints else {
+        return;
+    };
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        let base = std::sync::Arc::clone(&setup.device_descriptor);
+        setup.device_descriptor =
+            std::sync::Arc::new(move |adapter| eframe::wgpu::DeviceDescriptor {
+                memory_hints: memory_hints.clone(),
+                ..base(adapter)
+            });
+    }
+}
 
 fn surface_status_action(
     status: &eframe::wgpu::CurrentSurfaceTexture,
@@ -193,31 +199,45 @@ mod surface_status_tests {
 
 #[cfg(test)]
 mod native_options_tests {
-    use super::app_native_options;
+    use super::apply_memory_hints;
     use eframe::egui_wgpu::WgpuSetup;
     use eframe::wgpu;
 
-    #[test]
-    fn device_uses_host_blocks_larger_than_a_non_resizable_bar_heap() {
+    fn descriptor_memory_hints(hints: Option<wgpu::MemoryHints>) -> Option<wgpu::MemoryHints> {
         let instance = wgpu::Instance::default();
-        let Ok(adapter) =
+        let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        else {
-            return;
-        };
-        let WgpuSetup::CreateNew(setup) = app_native_options().wgpu_options.wgpu_setup else {
+                .ok()?;
+        let mut options = eframe::NativeOptions::default();
+        apply_memory_hints(&mut options, hints);
+        let WgpuSetup::CreateNew(setup) = options.wgpu_options.wgpu_setup else {
             panic!("expected a new wgpu setup");
         };
         let descriptor = (setup.device_descriptor)(&adapter);
-        match descriptor.memory_hints {
-            wgpu::MemoryHints::Manual {
-                suballocated_device_memory_block_size,
-            } => assert_eq!(
-                suballocated_device_memory_block_size,
-                (512 << 20)..(512 << 20)
-            ),
-            other => panic!("unexpected memory hints {other:?}"),
-        }
         assert_eq!(descriptor.required_limits.max_texture_dimension_2d, 8192);
+        Some(descriptor.memory_hints)
+    }
+
+    #[test]
+    fn device_keeps_default_memory_hints_without_manual_blocks() {
+        if let Some(hints) = descriptor_memory_hints(None) {
+            assert!(!matches!(hints, wgpu::MemoryHints::Manual { .. }));
+        }
+    }
+
+    #[test]
+    fn device_uses_the_configured_fixed_block_size() {
+        let block = 256u64 << 20;
+        let manual = wgpu::MemoryHints::Manual {
+            suballocated_device_memory_block_size: block..block,
+        };
+        if let Some(hints) = descriptor_memory_hints(Some(manual)) {
+            match hints {
+                wgpu::MemoryHints::Manual {
+                    suballocated_device_memory_block_size,
+                } => assert_eq!(suballocated_device_memory_block_size, block..block),
+                other => panic!("unexpected memory hints {other:?}"),
+            }
+        }
     }
 }
