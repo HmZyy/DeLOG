@@ -193,7 +193,7 @@ pub fn templates() -> &'static [NodeTemplate] {
             aliases: &["output", "publish", "emit"],
             make: || {
                 NodeKind::Output(OutputSpec {
-                    topic: "derived".to_owned(),
+                    topic: "out".to_owned(),
                     fields: vec![OutputFieldSpec {
                         name: "field_1".to_owned(),
                         unit: None,
