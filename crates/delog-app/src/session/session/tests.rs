@@ -143,30 +143,6 @@ fn write_unsorted_generic_parquet(path: &Path) {
     writer.close().unwrap();
 }
 
-fn write_all_invalid_parquet(path: &Path) {
-    let rows = delog_parsers::parquet::PARQUET_BATCH_ROWS * 32;
-    let schema = Arc::new(Schema::new(vec![
-        Field::new(
-            "time",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            true,
-        ),
-        Field::new("value", DataType::Float32, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(TimestampMillisecondArray::from(vec![None; rows])) as ArrayRef,
-            Arc::new(Float32Array::from(vec![Some(1.0); rows])) as ArrayRef,
-        ],
-    )
-    .unwrap();
-    let file = File::create(path).unwrap();
-    let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
-    writer.write(&batch).unwrap();
-    writer.close().unwrap();
-}
-
 fn structured_export_fixture() -> (StoreSnapshot, Vec<ExportField>) {
     let mut identity = IdentityRegistry::new();
     let flight_a = identity.add_source("flight-a");
@@ -695,16 +671,23 @@ fn a_generic_parquet_load_never_reports_an_unsorted_batch() {
 
 #[test]
 fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
-    let invalid_path = temp_parquet_path("invalid-progress-cancel");
-    write_all_invalid_parquet(&invalid_path);
+    let invalid_path = temp_path("invalid-progress-cancel");
+    File::create(&invalid_path)
+        .unwrap()
+        .write_all(b"progress")
+        .unwrap();
     let next_path = temp_path("after-invalid-cancel");
     File::create(&next_path)
         .unwrap()
         .write_all(&tiny_bin())
         .unwrap();
     let mut session = Session::new(egui::Context::default());
+    let mut registry = ParserRegistry::new();
+    registry.register(Arc::new(ArduPilotParser));
+    registry.register(Arc::new(StubProgressParser));
+    session.registry = Arc::new(registry);
 
-    session.open_path(invalid_path.clone(), None);
+    session.open_path(invalid_path.clone(), Some("progress-stub".into()));
     let cancel = session.active[0].cancel.clone();
     let loads = Arc::clone(&session.loads);
     let cancel_after_progress = std::thread::spawn(move || {
@@ -715,7 +698,7 @@ fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        panic!("all-invalid Parquet parse did not report progress");
+        panic!("the stub parse did not report progress");
     });
     session.join_workers();
     cancel_after_progress.join().unwrap();
@@ -730,7 +713,7 @@ fn pre_submit_cancellation_after_progress_does_not_contaminate_the_next_load() {
         .sources
         .iter()
         .find(|source| source.entry.label == source_label(invalid_path.as_path()))
-        .expect("all-invalid Parquet opens a provisional source")
+        .expect("the stub parse opens a provisional source")
         .entry
         .id;
 
@@ -835,6 +818,36 @@ impl LogParser for StubSetupParser {
     ) -> Result<ParseSummary, ParseError> {
         Err(ParseError::Setup {
             detail: "bad schema".into(),
+        })
+    }
+}
+
+struct StubProgressParser;
+
+impl LogParser for StubProgressParser {
+    fn name(&self) -> &'static str {
+        "progress-stub"
+    }
+
+    fn sniff(&self, _head: &[u8]) -> Sniff {
+        Sniff::no()
+    }
+
+    fn parse(
+        &self,
+        _src: Box<dyn ReadSeek>,
+        sink: &mut dyn IngestSink,
+        ctl: &ParseCtl,
+    ) -> Result<ParseSummary, ParseError> {
+        sink.progress(ctl.source(), 0.5);
+        for _ in 0..2_000 {
+            if ctl.is_cancelled() {
+                return Err(ParseError::SetupCancelled);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Err(ParseError::Setup {
+            detail: "never cancelled".into(),
         })
     }
 }

@@ -45,12 +45,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "lowercase")]
     fn a_capitalised_noun_is_rejected() {
         let _ = no_saved("Layouts");
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "trailing")]
     fn a_trailing_period_is_rejected() {
         let _ = no_items("topics.");
