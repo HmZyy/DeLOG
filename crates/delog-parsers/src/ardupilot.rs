@@ -5,7 +5,7 @@
 //! `FMTU`/`UNIT`/`MULT` attach units and multipliers. Raw values are stored and
 //! the unit + multiplier recorded in the [`TopicSchema`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 
@@ -68,14 +68,14 @@ impl LogParser for ArduPilotParser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct RawField {
     name: String,
     offset: usize,
     chr: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct MsgFormat {
     name: String,
     payload_len: usize,
@@ -89,9 +89,15 @@ impl MsgFormat {
     fn field(&self, name: &str) -> Option<&RawField> {
         self.fields.iter().find(|f| f.name == name)
     }
+
+    fn bounded_field(&self, name: &str, accepts: impl Fn(u8) -> bool) -> Option<(usize, u8)> {
+        let f = self.field(name).filter(|f| accepts(f.chr))?;
+        let width = type_size(f.chr)?;
+        (f.offset + width <= self.payload_len).then_some((f.offset, f.chr))
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Emit {
     offset: usize,
     chr: u8,
@@ -183,6 +189,7 @@ struct Decoder<'a> {
     parm_layouts: HashMap<u8, Option<ParmLayout>>,
     markers: Vec<AutoMarker>,
     marker_layouts: HashMap<u8, Option<MarkerLayout>>,
+    layout_changed: HashSet<u8>,
     row_count: u64,
     diagnostics: u64,
     implausible_times: u64,
@@ -208,6 +215,7 @@ impl<'a> Decoder<'a> {
             parm_layouts: HashMap::new(),
             markers: Vec::new(),
             marker_layouts: HashMap::new(),
+            layout_changed: HashSet::new(),
             row_count: 0,
             diagnostics: 0,
             implausible_times: 0,
@@ -297,15 +305,22 @@ impl<'a> Decoder<'a> {
 
         // The FMT record's own `Type` field is the msgid it describes.
         let described = payload[0];
-        self.formats.insert(
-            described,
-            MsgFormat {
-                name,
-                payload_len,
-                fields,
-                decodable,
-            },
-        );
+        let format = MsgFormat {
+            name,
+            payload_len,
+            fields,
+            decodable,
+        };
+        if self
+            .formats
+            .get(&described)
+            .is_some_and(|known| *known != format)
+        {
+            self.plans.remove(&described);
+            self.parm_layouts.remove(&described);
+            self.marker_layouts.remove(&described);
+        }
+        self.formats.insert(described, format);
         Ok(true)
     }
 
@@ -349,19 +364,23 @@ impl<'a> Decoder<'a> {
 
     fn read_unit(&mut self, msgid: u8, payload: &[u8]) {
         let fmt = &self.formats[&msgid];
-        if let (Some(id), Some(label)) = (fmt.field("Id"), fmt.field("Label")) {
-            let id_char = payload[id.offset];
-            let label = c_str(&payload[label.offset..label.offset + 64]);
-            self.units.insert(id_char, label);
+        if let (Some((id, _)), Some((label, chr))) = (
+            fmt.bounded_field("Id", is_byte_chr),
+            fmt.bounded_field("Label", |chr| str_len(chr) > 0),
+        ) {
+            let label = c_str(&payload[label..label + str_len(chr)]);
+            self.units.insert(payload[id], label);
         }
     }
 
     fn read_mult(&mut self, msgid: u8, payload: &[u8]) {
         let fmt = &self.formats[&msgid];
-        if let (Some(id), Some(mult)) = (fmt.field("Id"), fmt.field("Mult")) {
-            let id_char = payload[id.offset];
-            let value = f64::from_le_bytes(read_8(payload, mult.offset));
-            self.mults.insert(id_char, value);
+        if let (Some((id, _)), Some((mult, _))) = (
+            fmt.bounded_field("Id", is_byte_chr),
+            fmt.bounded_field("Mult", |chr| chr == b'd'),
+        ) {
+            let value = f64::from_le_bytes(read_8(payload, mult));
+            self.mults.insert(payload[id], value);
         }
     }
 
@@ -401,14 +420,9 @@ impl<'a> Decoder<'a> {
     fn build_parm_layout(&mut self, msgid: u8, record_offset: u64) -> Option<ParmLayout> {
         let resolved = {
             let fmt = &self.formats[&msgid];
-            let field = |name: &str| -> Option<(usize, u8)> {
-                let f = fmt.field(name)?;
-                let width = type_size(f.chr)?;
-                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
-            };
-            let name = field("Name").filter(|&(_, chr)| str_len(chr) > 0);
-            let value = field("Value").filter(|&(_, chr)| scalar_dtype(chr).is_some());
-            let default = field("Default").filter(|&(_, chr)| scalar_dtype(chr).is_some());
+            let name = fmt.bounded_field("Name", |chr| str_len(chr) > 0);
+            let value = fmt.bounded_field("Value", |chr| scalar_dtype(chr).is_some());
+            let default = fmt.bounded_field("Default", |chr| scalar_dtype(chr).is_some());
             name.zip(value).map(|(name, value)| ParmLayout {
                 name,
                 value,
@@ -473,21 +487,16 @@ impl<'a> Decoder<'a> {
     fn build_marker_layout(&mut self, msgid: u8, record_offset: u64) -> Option<MarkerLayout> {
         let resolved = {
             let fmt = &self.formats[&msgid];
-            let field = |name: &str| -> Option<(usize, u8)> {
-                let f = fmt.field(name)?;
-                let width = type_size(f.chr)?;
-                (f.offset + width <= fmt.payload_len).then_some((f.offset, f.chr))
-            };
             let kind = match fmt.name.as_str() {
-                "MSG" => field("Message")
-                    .filter(|&(_, chr)| str_len(chr) > 0)
+                "MSG" => fmt
+                    .bounded_field("Message", |chr| str_len(chr) > 0)
                     .map(|text| MarkerKind::Msg { text }),
-                "EV" => field("Id")
-                    .filter(|&(_, chr)| is_integer_chr(chr))
+                "EV" => fmt
+                    .bounded_field("Id", is_integer_chr)
                     .map(|id| MarkerKind::Event { id }),
                 _ => {
-                    let subsys = field("Subsys").filter(|&(_, chr)| is_integer_chr(chr));
-                    let ecode = field("ECode").filter(|&(_, chr)| is_integer_chr(chr));
+                    let subsys = fmt.bounded_field("Subsys", is_integer_chr);
+                    let ecode = fmt.bounded_field("ECode", is_integer_chr);
                     subsys
                         .zip(ecode)
                         .map(|(subsys, ecode)| MarkerKind::Error { subsys, ecode })
@@ -535,6 +544,22 @@ impl<'a> Decoder<'a> {
             }
             None => plan.base_name.clone(),
         };
+
+        if self
+            .topics
+            .get(&topic_name)
+            .is_some_and(|accum| accum.emits != plan.emits)
+        {
+            if self.layout_changed.insert(msgid) {
+                self.diagnostic(Diag::warning(
+                    "bin-layout-changed",
+                    format!(
+                        "`{topic_name}` was redefined with a different layout; its rows are skipped"
+                    ),
+                ));
+            }
+            return;
+        }
 
         // Instance topics get a schema renamed `MOT[N]` to hold the one-name
         // invariant (topic name == schema name); the base schema is reused as-is.
@@ -788,16 +813,17 @@ impl TopicAccum {
 impl Decoder<'_> {
     fn decode_fmtu(&mut self, msgid: u8, payload: &[u8]) {
         let fmt = &self.formats[&msgid];
-        let (Some(target), Some(units), Some(mults)) = (
-            fmt.field("FmtType"),
-            fmt.field("UnitIds"),
-            fmt.field("MultIds"),
+        let ids = |chr: u8| str_len(chr) > 0;
+        let (Some((target, _)), Some((units, units_chr)), Some((mults, mults_chr))) = (
+            fmt.bounded_field("FmtType", is_byte_chr),
+            fmt.bounded_field("UnitIds", ids),
+            fmt.bounded_field("MultIds", ids),
         ) else {
             return;
         };
-        let target_id = payload[target.offset];
-        let unit_ids = trimmed_bytes(&payload[units.offset..units.offset + 16]);
-        let mult_ids = trimmed_bytes(&payload[mults.offset..mults.offset + 16]);
+        let target_id = payload[target];
+        let unit_ids = trimmed_bytes(&payload[units..units + str_len(units_chr)]);
+        let mult_ids = trimmed_bytes(&payload[mults..mults + str_len(mults_chr)]);
         self.fmtu.insert(target_id, (unit_ids, mult_ids));
     }
 }
@@ -1105,6 +1131,10 @@ fn default_mult_unit(chr: u8) -> (f64, Option<&'static str>) {
         b'L' => (1e-7, Some("deg")),
         _ => (1.0, None),
     }
+}
+
+fn is_byte_chr(chr: u8) -> bool {
+    matches!(chr, b'b' | b'B' | b'M')
 }
 
 fn is_integer_chr(chr: u8) -> bool {
@@ -1537,5 +1567,140 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn push_fmt_with_len(
+        buf: &mut Vec<u8>,
+        type_id: u8,
+        length: u8,
+        name: &str,
+        format: &str,
+        columns: &str,
+    ) {
+        buf.extend([HEAD1, HEAD2, FMT_MSGID, type_id, length]);
+        push_padded(buf, name.as_bytes(), 4);
+        push_padded(buf, format.as_bytes(), 16);
+        push_padded(buf, columns.as_bytes(), 64);
+    }
+
+    #[test]
+    fn unit_mult_and_fmtu_with_short_formats_are_skipped() {
+        let cases: [(&str, &str, &str); 3] = [
+            ("UNIT", "QbZ", "TimeUS,Id,Label"),
+            ("MULT", "Qbd", "TimeUS,Id,Mult"),
+            ("FMTU", "QBNN", "TimeUS,FmtType,UnitIds,MultIds"),
+        ];
+        for (name, format, columns) in cases {
+            let mut buf = Vec::new();
+            push_fmt_with_len(&mut buf, 10, 20, name, format, columns);
+            push_rec(&mut buf, 10, &[0x41; 17]);
+            push_fmt(&mut buf, 200, "TEST", "Qf", "TimeUS,A");
+            let mut p = 1_000u64.to_le_bytes().to_vec();
+            p.extend(1.5f32.to_le_bytes());
+            push_rec(&mut buf, 200, &p);
+
+            let (summary, _) = parse(buf);
+
+            assert_eq!(summary.row_count, 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_mult_with_a_non_double_value_is_ignored() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 11, "MULT", "Qbf", "TimeUS,Id,Mult");
+        let mut p = 1_000u64.to_le_bytes().to_vec();
+        p.push(b'2');
+        p.extend(0.5f32.to_le_bytes());
+        push_rec(&mut buf, 11, &p);
+        push_fmt(
+            &mut buf,
+            12,
+            "FMTU",
+            "QBNN",
+            "TimeUS,FmtType,UnitIds,MultIds",
+        );
+        let mut p = 1_000u64.to_le_bytes().to_vec();
+        p.push(200);
+        push_padded(&mut p, b"--", 16);
+        push_padded(&mut p, b"-2", 16);
+        push_rec(&mut buf, 12, &p);
+        push_fmt(&mut buf, 200, "TEST", "Qf", "TimeUS,A");
+        let mut p = 2_000u64.to_le_bytes().to_vec();
+        p.extend(1.5f32.to_le_bytes());
+        push_rec(&mut buf, 200, &p);
+
+        let (_, sink) = parse(buf);
+
+        let field = batch(&sink, "TEST").schema.field_by_name("A").unwrap();
+        assert_eq!(field.multiplier, 1.0);
+    }
+
+    #[test]
+    fn a_redefined_format_does_not_decode_with_the_old_layout() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 20, "XX", "Qf", "TimeUS,V");
+        for t in [1_000u64, 2_000] {
+            let mut p = t.to_le_bytes().to_vec();
+            p.extend(1.0f32.to_le_bytes());
+            push_rec(&mut buf, 20, &p);
+        }
+        push_fmt(&mut buf, 20, "XX", "Q", "TimeUS");
+        for t in [3_000u64, 4_000] {
+            push_rec(&mut buf, 20, &t.to_le_bytes());
+        }
+
+        let (summary, sink) = parse(buf);
+
+        let xx = batch(&sink, "XX");
+        assert_eq!(xx.schema.fields().len(), xx.columns.len());
+        assert_eq!(xx.timestamps.values(), &[1_000, 2_000]);
+        assert_eq!(summary.topic_count, 1);
+        assert!(sink.diags.iter().any(|d| d.code == "bin-layout-changed"));
+    }
+
+    #[test]
+    fn a_redefined_parm_format_rebuilds_its_layout() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 202, "PARM", "QNf", "TimeUS,Name,Value");
+        push_parm(&mut buf, 1_000, "RATE_RLL_P", 0.135);
+        push_fmt(&mut buf, 202, "PARM", "Qnf", "TimeUS,Name,Value");
+        let mut p = 2_000u64.to_le_bytes().to_vec();
+        p.extend(b"ABCD");
+        p.extend(2.0f32.to_le_bytes());
+        push_rec(&mut buf, 202, &p);
+
+        let (summary, _) = parse(buf);
+
+        let names: Vec<_> = summary
+            .source_meta
+            .params
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["ABCD", "RATE_RLL_P"]);
+    }
+
+    #[test]
+    fn a_redefined_msg_format_rebuilds_its_marker_layout() {
+        let mut buf = Vec::new();
+        push_fmt(&mut buf, 203, "MSG", "QZ", "TimeUS,Message");
+        let mut p = 1_000u64.to_le_bytes().to_vec();
+        push_padded(&mut p, b"armed", 64);
+        push_rec(&mut buf, 203, &p);
+        push_fmt(&mut buf, 203, "MSG", "Qn", "TimeUS,Message");
+        let mut p = 2_000u64.to_le_bytes().to_vec();
+        p.extend(b"land");
+        push_rec(&mut buf, 203, &p);
+
+        let (summary, _) = parse(buf);
+
+        let texts: Vec<_> = summary
+            .source_meta
+            .auto_markers
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(texts, ["armed", "land"]);
     }
 }

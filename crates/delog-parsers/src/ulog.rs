@@ -1,6 +1,6 @@
 //! PX4 ULog `.ulg` parser.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 
@@ -25,6 +25,8 @@ const BATCH_ROWS: usize = 8192;
 const START_SKEW_US: u64 = 1_000_000;
 const MAX_LOG_SPAN_US: u64 = 24 * 60 * 60 * 1_000_000;
 const INVALID_TS_DIAG_INTERVAL: u64 = 1024;
+const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
+const MAX_FORMAT_DEPTH: usize = 32;
 
 #[derive(Debug, Default)]
 pub struct ULogParser;
@@ -160,6 +162,7 @@ struct Decoder<'a> {
     formats: HashMap<String, RawFormat>,
     subscriptions: HashMap<u16, Subscription>,
     topics: HashMap<String, TopicAccum>,
+    layout_changed: HashSet<u16>,
     start_timestamp_us: u64,
     invalid_timestamps: u64,
     last_data_timestamp_us: Option<i64>,
@@ -180,6 +183,7 @@ impl<'a> Decoder<'a> {
             formats: HashMap::new(),
             subscriptions: HashMap::new(),
             topics: HashMap::new(),
+            layout_changed: HashSet::new(),
             start_timestamp_us: 0,
             invalid_timestamps: 0,
             last_data_timestamp_us: None,
@@ -207,8 +211,28 @@ impl<'a> Decoder<'a> {
         }
         self.start_timestamp_us = u64::from_le_bytes(read_8(&header, 8));
 
+        let result = self.read_messages(&mut reader);
+        self.flush_all();
+        let summary = self.summary();
+        self.sink.close_source(self.source, summary.clone());
+        result.map(|()| summary)
+    }
+
+    fn read_messages(&mut self, reader: &mut Reader) -> Result<(), ParseError> {
         let mut record_index = 0u64;
-        while let Some((ty, payload, msg_offset)) = reader.next_msg()? {
+        loop {
+            let (ty, payload, msg_offset) = match reader.next_msg() {
+                Ok(Some(msg)) => msg,
+                Ok(None) => return Ok(()),
+                Err(ParseError::Framing {
+                    byte_offset,
+                    detail,
+                }) => {
+                    self.diagnostic(Diag::warning("ulog-truncated", detail).at_byte(byte_offset));
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            };
             match ty {
                 b'B' => self.read_flag_bits(&payload, msg_offset)?,
                 b'F' => self.read_format(&payload, msg_offset),
@@ -224,17 +248,10 @@ impl<'a> Decoder<'a> {
 
             record_index += 1;
             if self.ctl.cancelled_at(record_index) {
-                self.flush_all();
-                self.sink.close_source(self.source, self.summary());
                 return Err(ParseError::Cancelled);
             }
             self.ctl.report_progress(self.sink, reader.offset());
         }
-
-        self.flush_all();
-        let summary = self.summary();
-        self.sink.close_source(self.source, summary.clone());
-        Ok(summary)
     }
 
     fn read_flag_bits(&mut self, payload: &[u8], msg_offset: u64) -> Result<(), ParseError> {
@@ -429,6 +446,26 @@ impl<'a> Decoder<'a> {
             return;
         }
 
+        if self
+            .topics
+            .get(&plan.topic_name)
+            .is_some_and(|accum| accum.schema != plan.schema)
+        {
+            if self.layout_changed.insert(msg_id) {
+                self.diagnostic(
+                    Diag::warning(
+                        "ulog-layout-changed",
+                        format!(
+                            "`{}` was redefined with a different layout; its rows are skipped",
+                            plan.topic_name
+                        ),
+                    )
+                    .at_byte(msg_offset),
+                );
+            }
+            return;
+        }
+
         let accum = self
             .topics
             .entry(plan.topic_name.clone())
@@ -532,17 +569,16 @@ impl<'a> Decoder<'a> {
         };
 
         let topic_name = format!("{format_name}[{multi_id}]");
-        let emits = layout
+        let (emits, fields): (Vec<_>, Vec<_>) = layout
             .fields
             .into_iter()
             .filter(|field| field.name != "timestamp")
-            .collect::<Vec<_>>();
-        let fields = emits
-            .iter()
             .filter_map(|field| {
-                FieldSchema::new(&field.name, field.kind.dtype(), None::<String>, 1.0).ok()
+                let schema =
+                    FieldSchema::new(&field.name, field.kind.dtype(), None::<String>, 1.0).ok()?;
+                Some((field, schema))
             })
-            .collect::<Vec<_>>();
+            .unzip();
         let schema = Arc::new(TopicSchema::new(&topic_name, fields).ok()?);
         Some(Plan {
             topic_name,
@@ -769,6 +805,9 @@ fn build_layout(
     if stack.iter().any(|name| name == format_name) {
         return Err("recursive format definition".to_owned());
     }
+    if stack.len() >= MAX_FORMAT_DEPTH {
+        return Err("format nesting is too deep".to_owned());
+    }
     let Some(format) = defs.get(format_name) else {
         return Err("referenced format is not defined".to_owned());
     };
@@ -779,8 +818,9 @@ fn build_layout(
         let count = field.array_len.max(1);
         if let Some(kind) = scalar_kind(&field.ty) {
             let elem_width = kind.width();
+            let field_end = grow_layout(offset, elem_width, count)?;
             if field.name.starts_with("_padding") {
-                offset += elem_width * count;
+                offset = field_end;
                 continue;
             }
             if kind == ScalarKind::Char && count > 1 {
@@ -789,7 +829,6 @@ fn build_layout(
                     offset,
                     kind: ScalarKind::CharString(count),
                 });
-                offset += count;
             } else {
                 for idx in 0..count {
                     fields.push(FlatField {
@@ -798,10 +837,11 @@ fn build_layout(
                         kind,
                     });
                 }
-                offset += elem_width * count;
             }
+            offset = field_end;
         } else {
             let nested = build_layout(&field.ty, defs, stack)?;
+            let field_end = grow_layout(offset, nested.width, count)?;
             for idx in 0..count {
                 let base = array_name(&field.name, count, idx);
                 for nested_field in &nested.fields {
@@ -812,7 +852,7 @@ fn build_layout(
                     });
                 }
             }
-            offset += nested.width * count;
+            offset = field_end;
         }
     }
     stack.pop();
@@ -820,6 +860,14 @@ fn build_layout(
         width: offset,
         fields,
     })
+}
+
+fn grow_layout(offset: usize, elem_width: usize, count: usize) -> Result<usize, String> {
+    elem_width
+        .checked_mul(count)
+        .and_then(|width| offset.checked_add(width))
+        .filter(|&end| end <= MAX_MESSAGE_LEN)
+        .ok_or_else(|| "format is wider than a ULog message".to_owned())
 }
 
 fn parse_field_decl(decl: &str) -> Option<RawField> {
@@ -1346,5 +1394,164 @@ mod tests {
         assert_eq!(marker.time_us, 12_345);
         assert_eq!(marker.level, Some(6));
         assert_eq!(marker.text, "armed and ready");
+    }
+
+    fn ulog_header() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend(MAGIC);
+        buf.push(1);
+        buf.extend(0u64.to_le_bytes());
+        buf
+    }
+
+    fn push_subscription(buf: &mut Vec<u8>, multi_id: u8, msg_id: u16, name: &[u8]) {
+        let mut sub = vec![multi_id];
+        sub.extend(msg_id.to_le_bytes());
+        sub.extend(name);
+        push_msg(buf, b'A', &sub);
+    }
+
+    fn push_row(buf: &mut Vec<u8>, msg_id: u16, ts: u64, body: &[u8]) {
+        let mut data = Vec::new();
+        data.extend(msg_id.to_le_bytes());
+        data.extend(ts.to_le_bytes());
+        data.extend(body);
+        push_msg(buf, b'D', &data);
+    }
+
+    #[test]
+    fn truncated_final_message_keeps_buffered_rows_and_metadata() {
+        let mut buf = ulog_header();
+        push_msg(&mut buf, b'F', b"test:uint64_t timestamp;float value;");
+        push_subscription(&mut buf, 0, 1, b"test");
+        for i in 1..=3u64 {
+            push_row(&mut buf, 1, i * 1_000, &(i as f32).to_le_bytes());
+        }
+        let mut logged = vec![6];
+        logged.extend(1_500u64.to_le_bytes());
+        logged.extend(b"armed");
+        push_msg(&mut buf, b'L', &logged);
+        buf.extend(14u16.to_le_bytes());
+        buf.push(b'D');
+        buf.extend([1, 0, 0x10]);
+
+        let (summary, sink) = parse(buf);
+
+        assert_eq!(summary.row_count, 3);
+        assert_eq!(summary.source_meta.auto_markers.len(), 1);
+        let rows: usize = sink.batches.iter().map(|b| b.timestamps.len()).sum();
+        assert_eq!(rows, 3);
+        assert!(sink.diags.iter().any(|d| d.code == "ulog-truncated"));
+    }
+
+    #[test]
+    fn truncated_message_header_is_treated_as_end_of_log() {
+        let mut buf = ulog_header();
+        push_msg(&mut buf, b'F', b"test:uint64_t timestamp;float value;");
+        push_subscription(&mut buf, 0, 1, b"test");
+        push_row(&mut buf, 1, 1_000, &1.0f32.to_le_bytes());
+        buf.push(0x05);
+
+        let (summary, sink) = parse(buf);
+
+        assert_eq!(summary.row_count, 1);
+        assert_eq!(sink.batches.len(), 1);
+        assert!(sink.diags.iter().any(|d| d.code == "ulog-truncated"));
+    }
+
+    #[test]
+    fn formats_wider_than_a_message_are_rejected() {
+        for decl in [
+            &b"big:uint64_t timestamp;float[200000000] v;"[..],
+            b"big:uint64_t timestamp;double[9000] v;",
+            b"big:uint64_t timestamp;float[18446744073709551615] v;",
+        ] {
+            let mut buf = ulog_header();
+            push_msg(&mut buf, b'F', decl);
+            push_subscription(&mut buf, 0, 1, b"big");
+            push_row(&mut buf, 1, 1_000, &[0; 8]);
+
+            let (summary, sink) = parse(buf);
+
+            assert_eq!(summary.row_count, 0);
+            assert!(sink.diags.iter().any(|d| d.code == "ulog-bad-layout"));
+        }
+    }
+
+    #[test]
+    fn nested_formats_that_multiply_past_a_message_are_rejected() {
+        let mut buf = ulog_header();
+        push_msg(&mut buf, b'F', b"inner:double[4096] v;");
+        push_msg(&mut buf, b'F', b"outer:uint64_t timestamp;inner[4096] x;");
+        push_subscription(&mut buf, 0, 1, b"outer");
+
+        let (summary, sink) = parse(buf);
+
+        assert_eq!(summary.row_count, 0);
+        assert!(sink.diags.iter().any(|d| d.code == "ulog-bad-layout"));
+    }
+
+    #[test]
+    fn deeply_chained_formats_are_rejected_without_overflowing_the_stack() {
+        let mut buf = ulog_header();
+        let depth = 20_000;
+        for i in 0..depth {
+            let decl = format!("f{i}:f{} x;", i + 1);
+            push_msg(&mut buf, b'F', decl.as_bytes());
+        }
+        push_msg(&mut buf, b'F', format!("f{depth}:float v;").as_bytes());
+        push_msg(&mut buf, b'F', b"top:uint64_t timestamp;f0 x;");
+        push_subscription(&mut buf, 0, 1, b"top");
+
+        let (_, sink) = parse(buf);
+
+        assert!(sink.diags.iter().any(|d| d.code == "ulog-bad-layout"));
+    }
+
+    #[test]
+    fn data_for_a_redefined_format_with_a_different_layout_is_skipped() {
+        let mut buf = ulog_header();
+        push_msg(&mut buf, b'F', b"t:uint64_t timestamp;char[4] s;");
+        push_subscription(&mut buf, 0, 1, b"t");
+        push_row(&mut buf, 1, 1_000, b"abcd");
+        push_msg(&mut buf, b'F', b"t:uint64_t timestamp;uint8_t s;");
+        push_subscription(&mut buf, 0, 2, b"t");
+        push_row(&mut buf, 2, 2_000, &[5]);
+        push_row(&mut buf, 1, 3_000, b"wxyz");
+
+        let (summary, sink) = parse(buf);
+
+        assert_eq!(summary.topic_count, 1);
+        let batch = &sink.batches[0];
+        assert_eq!(batch.timestamps.values(), &[1_000, 3_000]);
+        assert_eq!(batch.schema.fields().len(), batch.columns.len());
+        let s = batch.columns[0]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(s.value(1), "wxyz");
+        assert!(sink.diags.iter().any(|d| d.code == "ulog-layout-changed"));
+    }
+
+    #[test]
+    fn fields_that_cannot_be_named_are_dropped_from_both_schema_and_columns() {
+        let mut buf = ulog_header();
+        push_msg(&mut buf, b'F', b"t:uint64_t timestamp;float [1];float v;");
+        push_subscription(&mut buf, 0, 1, b"t");
+        let mut body = 9.0f32.to_le_bytes().to_vec();
+        body.extend(2.5f32.to_le_bytes());
+        push_row(&mut buf, 1, 1_000, &body);
+
+        let (summary, sink) = parse(buf);
+
+        assert_eq!(summary.row_count, 1);
+        let batch = &sink.batches[0];
+        assert_eq!(batch.schema.fields().len(), 1);
+        assert_eq!(batch.columns.len(), 1);
+        let v = batch.columns[0]
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
+        assert_eq!(v.values(), &[2.5]);
     }
 }
