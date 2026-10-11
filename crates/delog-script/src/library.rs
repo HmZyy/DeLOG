@@ -90,4 +90,25 @@ mod tests {
         assert!(lib.save("../evil", "x").is_err());
         assert!(lib.load("a/b").is_err());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_and_load_script_symlink_to_external_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp =
+            std::env::temp_dir().join(format!("delog-script-link-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let scripts = tmp.join("scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        let target = tmp.join("shared.py");
+        fs::write(&target, "print('linked')").unwrap();
+        symlink(&target, scripts.join("linked.py")).unwrap();
+
+        let lib = ScriptLibrary::new(&scripts);
+        assert_eq!(lib.list().unwrap(), vec!["linked"]);
+        assert_eq!(lib.load("linked").unwrap(), "print('linked')");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
 }
