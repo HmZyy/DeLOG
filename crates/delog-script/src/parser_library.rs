@@ -321,10 +321,24 @@ impl ParserLibrary {
         let mut names = Vec::new();
         for entry in entries {
             let entry = entry?;
-            if entry.file_type()?.is_file()
-                && let Some(name) = entry.file_name().to_str()
-                && matches!(self.normalize_name(name), Ok(normalized) if normalized == name)
-            {
+            let filename = entry.file_name();
+            let Some(name) = filename.to_str() else {
+                continue;
+            };
+            if !matches!(self.normalize_name(name), Ok(normalized) if normalized == name) {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            let is_file = if file_type.is_symlink() {
+                match fs::metadata(entry.path()) {
+                    Ok(metadata) => metadata.is_file(),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                file_type.is_file()
+            };
+            if is_file {
                 names.push(name.to_owned());
             }
         }
@@ -758,6 +772,57 @@ mod tests {
 
         let library = ParserLibrary::new(&temp.0);
         assert_eq!(library.list().unwrap(), vec!["alpha.py", "zulu.py"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_and_load_parser_symlink_to_external_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let library_dir = temp.0.join("parsers");
+        fs::create_dir_all(&library_dir).unwrap();
+        let target = temp.0.join("shared_parser.py");
+        fs::write(&target, "def Parse(raw_data):\n    return {}\n").unwrap();
+        symlink(&target, library_dir.join("linked.py")).unwrap();
+
+        let library = ParserLibrary::new(&library_dir);
+        assert_eq!(library.list().unwrap(), vec!["linked.py"]);
+        assert_eq!(
+            library.load("linked.py").unwrap(),
+            "def Parse(raw_data):\n    return {}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_dangling_links_and_links_to_directories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let library_dir = temp.0.join("parsers");
+        fs::create_dir_all(&library_dir).unwrap();
+        symlink(temp.0.join("missing.py"), library_dir.join("broken.py")).unwrap();
+        symlink(&temp.0, library_dir.join("directory.py")).unwrap();
+
+        assert!(ParserLibrary::new(&library_dir).list().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_reports_unexpected_symlink_target_errors() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let library_dir = temp.0.join("parsers");
+        fs::create_dir_all(&library_dir).unwrap();
+        symlink("linked.py", library_dir.join("linked.py")).unwrap();
+
+        let result = ParserLibrary::new(&library_dir).list();
+        assert!(
+            result.is_err(),
+            "a symlink loop must not disappear: {result:?}"
+        );
     }
 
     #[test]
