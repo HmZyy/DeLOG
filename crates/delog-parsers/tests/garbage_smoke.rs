@@ -14,7 +14,7 @@ use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_parsers::mavlink::{FrameDecoder, extract_fields};
 use delog_parsers::{
-    ArduPilotParser, LogParser, ParquetParser, ParseError, TlogParser, ULogParser,
+    ArduPilotParser, LogParser, McapParser, ParquetParser, ParseError, TlogParser, ULogParser,
 };
 use parquet::arrow::ArrowWriter;
 
@@ -43,6 +43,9 @@ fn drive_all(data: &[u8]) {
     drive(&TlogParser, data);
     let parquet = ParquetParser;
     drive(&parquet, data);
+
+    let mcap = McapParser;
+    drive(&mcap, data);
 
     let mut decoder = FrameDecoder::new();
     decoder.push(data);

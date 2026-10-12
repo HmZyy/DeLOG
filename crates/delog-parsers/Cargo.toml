@@ -13,8 +13,10 @@ delog-parquet-format = { workspace = true }
 arrow = { workspace = true }
 bytes = { workspace = true }
 mavlink = { workspace = true }
+mcap = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

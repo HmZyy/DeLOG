@@ -616,7 +616,7 @@ fn parser_names_lists_every_registered_parser() {
     let session = Session::new(egui::Context::default());
     assert_eq!(
         session.parser_names(),
-        ["ardupilot-bin", "ulog", "tlog", "parquet"]
+        ["ardupilot-bin", "ulog", "tlog", "parquet", "mcap"]
     );
 }
 

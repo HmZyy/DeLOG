@@ -816,7 +816,9 @@ impl DelogApp {
                     None => rfd::FileDialog::new()
                         .add_filter(
                             "Flight logs",
-                            &["bin", "BIN", "ulg", "ulog", "tlog", "parquet"],
+                            &[
+                                "bin", "BIN", "ulg", "ulog", "tlog", "parquet", "mcap", "MCAP",
+                            ],
                         )
                         .add_filter("All files", &["*"])
                         .set_title("Open flight logs"),
@@ -5024,6 +5026,7 @@ const BUILT_IN_PARSER_PRESENTATIONS: &[(&str, &str)] = &[
     ("ulog", "PX4"),
     ("tlog", "MAVLink"),
     ("parquet", "Parquet"),
+    ("mcap", "MCAP"),
 ];
 
 fn parser_label(name: &str) -> &str {

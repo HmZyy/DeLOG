@@ -8,7 +8,7 @@ use delog_core::identity::SourceId;
 use delog_core::ingest::{IngestSink, ParseSummary, ParsedBatch, SourceKind};
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_parsers::mavlink::{FrameDecoder, extract_fields};
-use delog_parsers::{ArduPilotParser, LogParser, TlogParser, ULogParser};
+use delog_parsers::{ArduPilotParser, LogParser, McapParser, TlogParser, ULogParser};
 
 #[derive(Default)]
 struct NullSink;
@@ -46,4 +46,8 @@ pub fn fuzz_mavlink(data: &[u8]) {
         }
     }
     drive(&TlogParser, data);
+}
+
+pub fn fuzz_mcap(data: &[u8]) {
+    drive(&McapParser, data);
 }

@@ -70,6 +70,9 @@ mavlink = { version = "0.18.0", default-features = false, features = [
 ] }
 serialport = "4.9.0"
 
+# MCAP container: chunk decompression, schema/channel records, JSON payloads
+mcap = "0.25.0"
+
 # app packaging (build scripts): decode/resize the logo into the runtime window
 # icon and, on Windows, a multi-size .ico embedded as a PE resource.
 image = { version = "0.25.10", default-features = false, features = [
