@@ -19,7 +19,7 @@ use delog_core::metrics::MetricsRegistry;
 use delog_core::parse_ctl::{CancelToken, ParseCtl};
 use delog_core::snapshot::{DataStore, StoreSnapshot};
 use delog_parsers::{
-    ArduPilotParser, Detection, LogParser, ParquetParser, ParseError, ParserRegistry,
+    ArduPilotParser, Detection, LogParser, McapParser, ParquetParser, ParseError, ParserRegistry,
     SNIFF_HEAD_LEN, TlogParser, ULogParser,
 };
 
@@ -187,6 +187,7 @@ impl Session {
         registry.register(Arc::new(ULogParser));
         registry.register(Arc::new(TlogParser));
         registry.register(Arc::new(ParquetParser));
+        registry.register(Arc::new(McapParser));
 
         Self {
             store,

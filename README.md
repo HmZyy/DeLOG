@@ -5,15 +5,16 @@ It supports PX4 ULog, ArduPilot BIN, and MAVLink telemetry logs from QGroundCont
 or Mission Planner, and when a format or a derived signal isn't built in, you extend
 it in Python - both file parsers and analysis scripts - without recompiling.
 
-
 ![DéLOG screenshot](docs/screenshot.png)
 
 ## Features
 
 - **Multiple log formats** - PX4 ULog (`.ulg`), ArduPilot (`.BIN`), MAVLink
-  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, and Parquet files,
-  with automatic format sniffing and a manual-override picker. Structured DéLOG Parquet
-  files open automatically; generic Parquet files prompt for a timestamp field and unit.
+  telemetry logs (`.tlog`) from QGroundControl or Mission Planner, MCAP files
+  (`.mcap`), and Parquet files, with automatic format sniffing and a
+  manual-override picker. Structured DéLOG Parquet files open automatically;
+  generic Parquet files prompt for a timestamp field and unit. MCAP channels
+  become topics.
 - **Live MAVLink telemetry** - stream from a vehicle over UDP, TCP, or serial through the
   same ingest path as files, and record incoming frames to a `.tlog`.
 - **Custom parsers** - add Python parsers for formats DéLOG doesn't ship, defining a single
@@ -26,7 +27,6 @@ it in Python - both file parsers and analysis scripts - without recompiling.
   Python required. See [docs/dataflow.md](docs/dataflow.md).
 - **Fast WGPU visualization** - GPU-rendered line/scatter/step plots with automatic
   decimation for million-point series, plus a 3D trajectory view with vehicle models.
-
 
 ## Installation
 

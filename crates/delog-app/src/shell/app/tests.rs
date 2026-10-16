@@ -371,6 +371,7 @@ fn built_in_parser_labels_match_the_file_open_with_menu() {
             ("ulog", "PX4"),
             ("tlog", "MAVLink"),
             ("parquet", "Parquet"),
+            ("mcap", "MCAP"),
         ]
     );
     assert_eq!(parser_label("ardupilot-bin"), "ArduPilot");
