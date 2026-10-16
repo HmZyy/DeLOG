@@ -1,10 +1,12 @@
 //! JSON-Schema channel definitions and streaming payload extraction.
 //!
-//! Each MCAP channel pairs a JSON Schema with JSON payloads. Only top-level
-//! scalar properties become DeLOG fields; nested objects/arrays and base64
-//! blobs are skipped. Extraction streams the payload through `serde` into a
-//! preallocated scratch slice, so payloads are never materialized as
-//! `serde_json::Value` - which keeps large base64 blobs from allocating.
+//! Each MCAP channel pairs a JSON Schema with JSON payloads. Top-level scalars
+//! become DeLOG fields; a property that is a valued object
+//! (`{"value": …, "unit": …, "exponent": …}`) contributes its `value`. Other
+//! nested objects/arrays and base64 blobs are skipped. Extraction streams the
+//! payload through `serde` into a preallocated scratch slice, so payloads are
+//! never materialized as `serde_json::Value` - which keeps large base64 blobs
+//! from allocating.
 
 use std::collections::HashMap;
 
@@ -33,6 +35,9 @@ pub enum FieldDtype {
 pub struct FieldSpec {
     pub key: String,
     pub dtype: FieldDtype,
+    /// The value sits one level down, in a `{"value": …, "unit": …, "exponent": …}`
+    /// wrapper object.
+    pub wrapped: bool,
 }
 
 /// Properties dropped as clock/descriptor metadata rather than signals; MCAP
@@ -61,21 +66,52 @@ pub fn plan_schema(data: &[u8]) -> Result<SchemaPlan, String> {
             if DROPPED_FIELDS.contains(&name.as_str()) {
                 continue;
             }
-            let dtype = match spec.get("type").and_then(Value::as_str) {
-                Some("integer") => FieldDtype::Int,
-                Some("number") => FieldDtype::Float,
-                Some("boolean") => FieldDtype::Bool,
-                Some("string") => FieldDtype::Str,
-                // Arrays, nested objects, unions, and untyped properties.
-                _ => continue,
-            };
-            fields.push(FieldSpec {
-                key: name.clone(),
-                dtype,
-            });
+            if let Some((dtype, wrapped)) = field_dtype(spec) {
+                fields.push(FieldSpec {
+                    key: name.clone(),
+                    dtype,
+                    wrapped,
+                });
+            }
         }
     }
     Ok(SchemaPlan { fields, is_media })
+}
+
+/// Resolve a property to a scalar field, unwrapping a `{"value": …}` object
+/// envelope when the signal wraps its payload.
+fn field_dtype(spec: &Value) -> Option<(FieldDtype, bool)> {
+    if spec.get("type").and_then(Value::as_str) == Some("object") {
+        spec.get("properties")
+            .and_then(|properties| properties.get("value"))
+            .and_then(scalar_dtype)
+            .map(|dtype| (dtype, true))
+    } else {
+        scalar_dtype(spec).map(|dtype| (dtype, false))
+    }
+}
+
+fn dtype_from_name(name: &str) -> Option<FieldDtype> {
+    match name {
+        "integer" => Some(FieldDtype::Int),
+        "number" => Some(FieldDtype::Float),
+        "boolean" => Some(FieldDtype::Bool),
+        "string" => Some(FieldDtype::Str),
+        _ => None,
+    }
+}
+
+/// The scalar dtype a JSON Schema `type` names, which may be a single name or a
+/// list. When a key mixes types, numeric wins so it stays plottable.
+fn scalar_dtype(spec: &Value) -> Option<FieldDtype> {
+    match spec.get("type")? {
+        Value::String(name) => dtype_from_name(name),
+        Value::Array(names) => ["number", "integer", "boolean", "string"]
+            .into_iter()
+            .find(|&name| names.iter().any(|t| t.as_str() == Some(name)))
+            .and_then(dtype_from_name),
+        _ => None,
+    }
 }
 
 /// Extract the wanted fields from one JSON payload into `out`, which is sized to
@@ -83,7 +119,7 @@ pub fn plan_schema(data: &[u8]) -> Result<SchemaPlan, String> {
 /// with no matching property are left [`Scalar::Missing`].
 pub fn read_fields(
     data: &[u8],
-    wanted: &HashMap<String, usize>,
+    wanted: &HashMap<String, (usize, bool)>,
     out: &mut [Scalar],
 ) -> Result<(), String> {
     for slot in out.iter_mut() {
@@ -96,7 +132,7 @@ pub fn read_fields(
 }
 
 struct MessageSeed<'a> {
-    wanted: &'a HashMap<String, usize>,
+    wanted: &'a HashMap<String, (usize, bool)>,
     out: &'a mut [Scalar],
 }
 
@@ -112,7 +148,7 @@ impl<'de> DeserializeSeed<'de> for MessageSeed<'_> {
 }
 
 struct MessageVisitor<'a> {
-    wanted: &'a HashMap<String, usize>,
+    wanted: &'a HashMap<String, (usize, bool)>,
     out: &'a mut [Scalar],
 }
 
@@ -126,15 +162,56 @@ impl<'de> Visitor<'de> for MessageVisitor<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let MessageVisitor { wanted, out } = self;
         while let Some(key) = map.next_key::<&str>()? {
-            if let Some(&index) = wanted.get(key) {
-                out[index] = map.next_value_seed(ScalarSeed)?;
-            } else {
-                // Skips the value without allocating it (base64 blobs, nested
-                // objects, unknown properties).
-                map.next_value::<IgnoredAny>()?;
+            match wanted.get(key) {
+                Some(&(index, false)) => {
+                    out[index] = map.next_value_seed(ScalarSeed)?;
+                }
+                Some(&(index, true)) => {
+                    out[index] = map.next_value_seed(WrappedSeed)?;
+                }
+                None => {
+                    // Skips the value without allocating it (base64 blobs, nested
+                    // objects, unknown properties).
+                    map.next_value::<IgnoredAny>()?;
+                }
             }
         }
         Ok(())
+    }
+}
+
+/// Reads the `value` of a `{"value": …, "unit": …, "exponent": …}` wrapper,
+/// ignoring the metadata keys. A wrapper without `value` stays
+/// [`Scalar::Missing`].
+struct WrappedSeed;
+
+impl<'de> DeserializeSeed<'de> for WrappedSeed {
+    type Value = Scalar;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Scalar, D::Error> {
+        deserializer.deserialize_map(WrappedVisitor)
+    }
+}
+
+struct WrappedVisitor;
+
+impl<'de> Visitor<'de> for WrappedVisitor {
+    type Value = Scalar;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a signal wrapper object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Scalar, A::Error> {
+        let mut value = Scalar::Missing;
+        while let Some(key) = map.next_key::<&str>()? {
+            if key == "value" {
+                value = map.next_value_seed(ScalarSeed)?;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(value)
     }
 }
 
@@ -197,12 +274,20 @@ impl<'de> Visitor<'de> for ScalarVisitor {
 mod tests {
     use super::*;
 
-    fn wanted(specs: &[FieldSpec]) -> HashMap<String, usize> {
+    fn wanted(specs: &[FieldSpec]) -> HashMap<String, (usize, bool)> {
         specs
             .iter()
             .enumerate()
-            .map(|(index, spec)| (spec.key.clone(), index))
+            .map(|(index, spec)| (spec.key.clone(), (index, spec.wrapped)))
             .collect()
+    }
+
+    fn spec(key: &str, dtype: FieldDtype) -> FieldSpec {
+        FieldSpec {
+            key: key.into(),
+            dtype,
+            wrapped: false,
+        }
     }
 
     #[test]
@@ -210,12 +295,63 @@ mod tests {
         let schema = br#"{"properties":{
             "rtc":{"type":"number"},
             "value":{"type":"integer"},
-            "unit":{"type":"string"},
+            "unit":{"type":"string"}
         }}"#;
         let plan = plan_schema(schema).unwrap();
         let keys: Vec<&str> = plan.fields.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, ["value"]);
+        assert!(!plan.fields[0].wrapped);
         assert!(!plan.is_media);
+    }
+
+    #[test]
+    fn plan_unwraps_valued_objects_and_keeps_other_objects_out() {
+        let schema = br#"{"properties":{
+            "speed":{"type":"object","properties":{
+                "value":{"type":"number"},
+                "unit":{"type":"string"},
+                "exponent":{"type":"integer"}}},
+            "mode":{"type":"object","properties":{
+                "value":{"type":"string"},
+                "unit":{"type":"string"}}},
+            "clock":{"type":"object","properties":{
+                "sec":{"type":"integer"},
+                "nsec":{"type":"integer"}}}
+        }}"#;
+        let plan = plan_schema(schema).unwrap();
+        let mut fields: Vec<(&str, FieldDtype, bool)> = plan
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.dtype, f.wrapped))
+            .collect();
+        fields.sort_by_key(|f| f.0);
+        assert_eq!(
+            fields,
+            [
+                ("mode", FieldDtype::Str, true),
+                ("speed", FieldDtype::Float, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_resolves_a_union_of_types_to_one_scalar() {
+        let schema = br#"{"properties":{
+            "mixed":{"type":["string","number"]},
+            "flag":{"type":["boolean","string"]},
+            "blob":{"type":["object","array"]}
+        }}"#;
+        let plan = plan_schema(schema).unwrap();
+        let mut fields: Vec<(&str, FieldDtype)> = plan
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.dtype))
+            .collect();
+        fields.sort_by_key(|f| f.0);
+        assert_eq!(
+            fields,
+            [("flag", FieldDtype::Bool), ("mixed", FieldDtype::Float)]
+        );
     }
 
     #[test]
@@ -233,18 +369,9 @@ mod tests {
     #[test]
     fn read_fields_captures_wanted_scalars_and_skips_others() {
         let specs = vec![
-            FieldSpec {
-                key: "value".into(),
-                dtype: FieldDtype::Int,
-            },
-            FieldSpec {
-                key: "name".into(),
-                dtype: FieldDtype::Str,
-            },
-            FieldSpec {
-                key: "missing".into(),
-                dtype: FieldDtype::Float,
-            },
+            spec("value", FieldDtype::Int),
+            spec("name", FieldDtype::Str),
+            spec("missing", FieldDtype::Float),
         ];
         let map = wanted(&specs);
         let mut out = vec![Scalar::Missing; specs.len()];
@@ -270,13 +397,59 @@ mod tests {
 
     #[test]
     fn unsigned_values_beyond_i64_become_floats() {
-        let specs = vec![FieldSpec {
-            key: "big".into(),
-            dtype: FieldDtype::Int,
-        }];
+        let specs = vec![spec("big", FieldDtype::Int)];
         let map = wanted(&specs);
         let mut out = vec![Scalar::Missing; 1];
         read_fields(br#"{"big":18446744073709551615}"#, &map, &mut out).unwrap();
         assert!(matches!(out[0], Scalar::Float(_)));
+    }
+
+    #[test]
+    fn read_fields_unwraps_valued_objects_and_ignores_metadata() {
+        let specs = vec![
+            FieldSpec {
+                key: "speed".into(),
+                dtype: FieldDtype::Float,
+                wrapped: true,
+            },
+            FieldSpec {
+                key: "mode".into(),
+                dtype: FieldDtype::Str,
+                wrapped: true,
+            },
+            FieldSpec {
+                key: "gone".into(),
+                dtype: FieldDtype::Float,
+                wrapped: true,
+            },
+        ];
+        let map = wanted(&specs);
+        let mut out = vec![Scalar::Missing; specs.len()];
+
+        read_fields(
+            br#"{"speed":{"value":12.5,"unit":"m/s","exponent":-1},
+                 "mode":{"value":"auto","unit":""},
+                 "gone":{"unit":"V"}}"#,
+            &map,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(out[0], Scalar::Float(12.5));
+        assert_eq!(out[1], Scalar::Str("auto".into()));
+        assert_eq!(out[2], Scalar::Missing);
+    }
+
+    #[test]
+    fn read_fields_treats_a_null_value_as_missing() {
+        let specs = vec![FieldSpec {
+            key: "speed".into(),
+            dtype: FieldDtype::Float,
+            wrapped: true,
+        }];
+        let map = wanted(&specs);
+        let mut out = vec![Scalar::Missing; 1];
+        read_fields(br#"{"speed":{"value":null,"unit":"m/s"}}"#, &map, &mut out).unwrap();
+        assert_eq!(out[0], Scalar::Missing);
     }
 }

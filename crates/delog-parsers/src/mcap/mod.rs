@@ -8,8 +8,10 @@
 //!
 //! One DeLOG topic is emitted per scalar channel, named from the MCAP topic with
 //! `/` replaced by `.` so the browser groups families. Fields are the schema's
-//! top-level scalar properties, minus clock/descriptor metadata. `log_time`
-//! (ns since the Unix epoch) becomes absolute µs, matching the tlog parser.
+//! top-level scalar properties, minus clock/descriptor metadata; a property that
+//! is a valued object (`{"value": …, "unit": …, "exponent": …}`) contributes its
+//! `value`. `log_time` (ns since the Unix epoch) becomes absolute µs, matching
+//! the tlog parser.
 //!
 //! Channels whose schema declares a base64 blob (embedded media) are skipped:
 //! they carry no scalar signals.
@@ -95,7 +97,7 @@ enum ChannelPlan {
 /// One channel's column builders and the field set extracted from each payload.
 struct NumericTopic {
     schema: Arc<TopicSchema>,
-    wanted: HashMap<String, usize>,
+    wanted: HashMap<String, (usize, bool)>,
     out: Vec<Scalar>,
     cols: Vec<Col>,
     ts: Int64Builder,
@@ -311,11 +313,11 @@ impl<'a> Decoder<'a> {
             }
         };
 
-        let wanted: HashMap<String, usize> = plan
+        let wanted: HashMap<String, (usize, bool)> = plan
             .fields
             .iter()
             .enumerate()
-            .map(|(index, spec)| (spec.key.clone(), index))
+            .map(|(index, spec)| (spec.key.clone(), (index, spec.wrapped)))
             .collect();
         let cols = plan
             .fields
@@ -600,7 +602,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Cursor;
 
-    use arrow::array::{Array, Int64Array, StringArray};
+    use arrow::array::{Array, Float64Array, StringArray};
     use delog_core::ingest::SourceKind;
     use delog_core::parse_ctl::CancelToken;
     use mcap::records::MessageHeader;
@@ -679,5 +681,63 @@ mod tests {
         let ctl = ParseCtl::new(CancelToken::new(), SourceId(0), 4);
         let result = McapParser.parse(Box::new(Cursor::new(b"nope".to_vec())), &mut sink, &ctl);
         assert!(matches!(result, Err(ParseError::Setup { .. })));
+    }
+
+    #[test]
+    fn valued_object_properties_become_scalar_fields() {
+        let bytes = build(|writer| {
+            let schema = br#"{"type":"object","properties":{
+                "speed":{"type":"object","properties":{
+                    "value":{"type":"number"},
+                    "unit":{"type":"string"},
+                    "exponent":{"type":"integer"}}},
+                "mode":{"type":"object","properties":{
+                    "value":{"type":"string"},
+                    "unit":{"type":"string"}}}
+            }}"#;
+            let schema_id = writer
+                .add_schema("group", "jsonschema", schema)
+                .expect("schema");
+            let channel = writer
+                .add_channel(schema_id, "/GROUP/one", "json", &BTreeMap::new())
+                .expect("channel");
+            write_message(
+                writer,
+                channel,
+                0,
+                ns(1_000),
+                r#"{"speed":{"value":12.5,"unit":"m/s","exponent":-1},"mode":{"value":"auto"}}"#,
+            );
+            write_message(writer, channel, 1, ns(2_000), r#"{"speed":{"value":3.0}}"#);
+        });
+
+        let (summary, sink) = parse(bytes);
+        assert_eq!(summary.topic_count, 1);
+        assert_eq!(summary.row_count, 2);
+        assert!(sink.diags.is_empty(), "{:?}", sink.diags);
+
+        let batch = &sink.batches[0];
+        assert_eq!(batch.topic(), "GROUP.one");
+        let column = |name: &str| {
+            let index = batch
+                .schema
+                .fields()
+                .iter()
+                .position(|field| field.name == name)
+                .expect("field");
+            &batch.columns[index]
+        };
+        let speed = column("speed")
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("float column");
+        assert_eq!(speed.value(0), 12.5);
+        assert_eq!(speed.value(1), 3.0);
+        let mode = column("mode")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("string column");
+        assert_eq!(mode.value(0), "auto");
+        assert!(mode.is_null(1));
     }
 }
