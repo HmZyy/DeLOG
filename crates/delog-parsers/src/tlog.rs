@@ -10,7 +10,6 @@
 //! name and any later `(sysid, compid)` emitting it gets a `message[N]` suffix.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufReader, Read};
 use std::sync::Arc;
 
 use arrow::array::{
@@ -26,6 +25,7 @@ use delog_core::schema::{FieldSchema, TopicSchema};
 use delog_core::time::TimeRange;
 use mavlink::Message;
 use mavlink::dialects::all::MavMessage;
+use mavlink_tlog::{ReadStats, TIMESTAMP_LEN, TlogReader};
 
 use crate::mavlink::{Scalar, decode_frame, extract_fields, frame_len};
 use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
@@ -33,10 +33,6 @@ use crate::parser::{LogParser, ParseError, ReadSeek, Sniff};
 const V1_MAGIC: u8 = 0xFE;
 const V2_MAGIC: u8 = 0xFD;
 const TS_LEN: usize = 8;
-/// Bytes of header needed to compute a frame's length: v2 reads the incompat
-/// flag at index 2, v1 only the length at index 1.
-const V2_HEADER_PEEK: usize = 3;
-const V1_HEADER_PEEK: usize = 2;
 const BATCH_ROWS: usize = 8192;
 const SKIP_DIAG_INTERVAL: u64 = 1024;
 
@@ -134,88 +130,30 @@ impl<'a> Decoder<'a> {
     }
 
     fn run(mut self, src: Box<dyn ReadSeek>) -> Result<ParseSummary, ParseError> {
-        let mut r = ByteReader::new(Box::new(BufReader::new(src)));
+        // mavlink-tlog checks every frame against its CRC and, on damage, skips
+        // forward to the next valid record instead of ending the parse.
+        let mut log = TlogReader::new(src);
+        let mut seen = ReadStats::default();
+        let mut record_bytes = 0u64;
         let mut record_index = 0u64;
-        loop {
-            if !r.fill(TS_LEN)? {
-                if r.available() > 0 {
-                    self.diag(
-                        Diag::warning("tlog-truncated", "trailing bytes shorter than a timestamp")
-                            .at_byte(r.offset()),
-                    );
+        while let Some(rec) = log.next_record()? {
+            let ts_us = rec.timestamp_us as i64;
+            let len = (TIMESTAMP_LEN + rec.frame.len()) as u64;
+            let msg_id = rec.frame.msg_id();
+            let decoded = decode_frame(rec.frame.as_bytes());
+            let offset = record_bytes + log.stats().skipped_bytes + TIMESTAMP_LEN as u64;
+            self.note_damage(&mut seen, log.stats(), offset);
+
+            // The frame already passed mavlink-tlog's CRC check, so a frame
+            // rust-mavlink cannot decode is an unknown message, not a bad CRC.
+            match decoded {
+                Some(d) if d.message.is_some() => {
+                    let msg = d.message.as_ref().expect("checked above");
+                    self.ingest(ts_us, d.system_id, d.component_id, msg, offset)
                 }
-                break;
+                _ => self.note_unknown(msg_id, offset),
             }
-            let ts_us = i64::from_be_bytes(r.peek(TS_LEN).try_into().expect("8-byte peek"));
-            let record_offset = r.offset();
-            r.consume(TS_LEN);
-
-            if !r.fill(1)? {
-                self.diag(
-                    Diag::warning("tlog-truncated", "timestamp at end of file with no frame")
-                        .at_byte(record_offset),
-                );
-                break;
-            }
-            let magic = r.peek(1)[0];
-            if magic != V1_MAGIC && magic != V2_MAGIC {
-                // Frame length is the only delimiter, so a non-magic byte here
-                // means envelope sync is unrecoverable; stop but keep prior data.
-                self.diag(
-                    Diag::warning(
-                        "tlog-desync",
-                        format!(
-                            "expected a MAVLink frame after the timestamp, found 0x{magic:02X}"
-                        ),
-                    )
-                    .at_byte(r.offset()),
-                );
-                break;
-            }
-
-            let header_peek = if magic == V2_MAGIC {
-                V2_HEADER_PEEK
-            } else {
-                V1_HEADER_PEEK
-            };
-            if !r.fill(header_peek)? {
-                self.diag(
-                    Diag::warning("tlog-truncated", "frame header runs past end of file")
-                        .at_byte(r.offset()),
-                );
-                break;
-            }
-            let Some(len) = frame_len(r.peek(header_peek)) else {
-                self.diag(
-                    Diag::warning("tlog-truncated", "frame header runs past end of file")
-                        .at_byte(r.offset()),
-                );
-                break;
-            };
-            if !r.fill(len)? {
-                self.diag(
-                    Diag::warning("tlog-truncated", "frame extends past end of file")
-                        .at_byte(r.offset()),
-                );
-                break;
-            }
-
-            // A bad CRC trusts the declared length and skips exactly one frame,
-            // keeping the envelope in sync for the next record.
-            match decode_frame(r.peek(len)) {
-                None => self.note_crc_failure(r.offset()),
-                Some(decoded) => match decoded.message.as_ref() {
-                    Some(msg) => self.ingest(
-                        ts_us,
-                        decoded.system_id,
-                        decoded.component_id,
-                        msg,
-                        r.offset(),
-                    ),
-                    None => self.note_unknown(decoded.message_id, r.offset()),
-                },
-            }
-            r.consume(len);
+            record_bytes += len;
 
             record_index += 1;
             if self.ctl.cancelled_at(record_index) {
@@ -224,13 +162,41 @@ impl<'a> Decoder<'a> {
                 self.sink.close_source(self.source, summary);
                 return Err(ParseError::Cancelled);
             }
-            self.ctl.report_progress(self.sink, r.offset());
+            self.ctl
+                .report_progress(self.sink, record_bytes + seen.skipped_bytes);
+        }
+        let end = record_bytes + log.stats().skipped_bytes;
+        self.note_damage(&mut seen, log.stats(), end);
+        if seen.truncated_tail > 0 {
+            self.diag(
+                Diag::warning("tlog-truncated", "last record runs past end of file").at_byte(end),
+            );
         }
 
         self.flush_all();
         let summary = self.summary();
         self.sink.close_source(self.source, summary.clone());
         Ok(summary)
+    }
+
+    /// Diagnose damage mavlink-tlog skipped since the last call.
+    fn note_damage(&mut self, seen: &mut ReadStats, now: ReadStats, offset: u64) {
+        for _ in seen.bad_crc..now.bad_crc {
+            self.note_crc_failure(offset);
+        }
+        if now.skipped_bytes > seen.skipped_bytes {
+            self.diag(
+                Diag::warning(
+                    "tlog-desync",
+                    format!(
+                        "skipped {} damaged byte(s) and resynchronised",
+                        now.skipped_bytes - seen.skipped_bytes
+                    ),
+                )
+                .at_byte(offset),
+            );
+        }
+        *seen = now;
     }
 
     fn ingest(&mut self, ts_us: i64, sys: u8, comp: u8, msg: &MavMessage, offset: u64) {
@@ -501,68 +467,6 @@ impl Col {
     }
 }
 
-/// A buffered reader with byte-offset tracking and look-ahead. The tlog envelope
-/// has no record length, so framing must peek a frame's header before committing
-/// to consume it.
-struct ByteReader {
-    inner: Box<dyn Read>,
-    buf: Vec<u8>,
-    start: usize,
-    offset: u64,
-    eof: bool,
-}
-
-impl ByteReader {
-    fn new(inner: Box<dyn Read>) -> Self {
-        Self {
-            inner,
-            buf: Vec::new(),
-            start: 0,
-            offset: 0,
-            eof: false,
-        }
-    }
-
-    fn available(&self) -> usize {
-        self.buf.len() - self.start
-    }
-
-    fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// Ensure at least `n` unconsumed bytes are buffered. Returns `false` at a
-    /// clean EOF before `n` bytes arrive.
-    fn fill(&mut self, n: usize) -> Result<bool, ParseError> {
-        while self.available() < n && !self.eof {
-            if self.start >= self.buf.len() {
-                self.buf.clear();
-                self.start = 0;
-            } else if self.start > 65_536 {
-                self.buf.drain(..self.start);
-                self.start = 0;
-            }
-            let mut tmp = [0u8; 8192];
-            match self.inner.read(&mut tmp) {
-                Ok(0) => self.eof = true,
-                Ok(k) => self.buf.extend_from_slice(&tmp[..k]),
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(ParseError::Io(e)),
-            }
-        }
-        Ok(self.available() >= n)
-    }
-
-    fn peek(&self, n: usize) -> &[u8] {
-        &self.buf[self.start..self.start + n]
-    }
-
-    fn consume(&mut self, n: usize) {
-        self.start += n;
-        self.offset += n as u64;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -830,13 +734,26 @@ mod tests {
     }
 
     #[test]
-    fn desync_after_timestamp_stops_cleanly() {
+    fn garbage_after_timestamp_resyncs_and_keeps_reading() {
         let mut buf = record(1_000_000, &v2(1, 1, 0, &attitude(1.0)));
         buf.extend(0u64.to_be_bytes());
         buf.extend([0x12, 0x34, 0x56]); // non-frame bytes after a timestamp
+        buf.extend(record(1_100_000, &v2(1, 1, 1, &attitude(2.0))));
 
         let (summary, sink) = parse(buf);
-        assert_eq!(summary.row_count, 1);
+        assert_eq!(summary.row_count, 2);
         assert!(sink.diags.iter().any(|d| d.code == "tlog-desync"));
+    }
+
+    #[test]
+    fn corrupted_length_byte_does_not_lose_the_next_record() {
+        let mut bad = v2(1, 1, 0, &attitude(9.0));
+        bad[1] = 200; // declared payload length now runs far past the frame
+        let mut buf = record(1_000_000, &bad);
+        buf.extend(record(1_100_000, &v2(1, 1, 1, &attitude(2.0))));
+        buf.extend(record(1_200_000, &v2(1, 1, 2, &attitude(3.0))));
+
+        let (summary, _) = parse(buf);
+        assert_eq!(summary.row_count, 2);
     }
 }

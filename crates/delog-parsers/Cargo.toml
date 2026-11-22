@@ -13,6 +13,7 @@ delog-parquet-format = { workspace = true }
 arrow = { workspace = true }
 bytes = { workspace = true }
 mavlink = { workspace = true }
+mavlink-tlog = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
